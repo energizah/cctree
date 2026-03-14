@@ -314,7 +314,7 @@ def _build_trie(cwd: str) -> tuple[dict, int]:
 def _msg_role(msg: dict) -> tuple[str, str]:
     """Return (role_char, style) for a message, distinguishing tool results from human."""
     if msg["type"] == "assistant":
-        return "🤖", ""
+        return "✨︎", ""
     # "user" type — check if it's actually a tool_result
     content = msg["message"].get("content", "")
     if isinstance(content, list):
@@ -322,8 +322,8 @@ def _msg_role(msg: dict) -> tuple[str, str]:
             isinstance(b, dict) and b.get("type") == "tool_result"
             for b in content
         ):
-            return "🔧", ""
-    return "👤", ""
+            return "🛠︎", ""
+    return "☻", ""
 
 
 def _preview(msg: dict) -> str:
