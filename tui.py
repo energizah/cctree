@@ -21,6 +21,7 @@ Keybindings:
     i           focus chat input
     /           search (incremental on labels, Enter for full content)
     n/N         next/prev search match (expands collapsed nodes)
+    o           open selected session in claude --resume
     Escape      cancel search or return to tree from input
     q           quit
 
@@ -46,7 +47,6 @@ Features:
 Ideas / TODO:
     - r to reload sessions without restarting
     - Filter by date (today, this week, etc.)
-    - o to open selected session in claude --resume
     - d to diff two selected nodes at a fork point
     - Cost summary across sessions
     - Bookmarks (m to mark, ' to jump)
@@ -545,6 +545,7 @@ class SessionTreeApp(App):
         Binding("p", "toggle_detail", "Toggle detail"),
         Binding("y", "yank_detail", "Copy detail"),
         Binding("i", "focus_input", "Chat"),
+        Binding("o", "open_session", "Open in claude"),
         Binding("slash", "search", "Search", show=False),
         Binding("n", "search_next", "Next match", show=False),
         Binding("N", "search_prev", "Prev match", show=False),
@@ -959,6 +960,32 @@ class SessionTreeApp(App):
 
     def action_focus_input(self) -> None:
         self.query_one("#chat-input", Input).focus()
+
+    def action_open_session(self) -> None:
+        """Suspend the TUI and open the selected session in claude --resume."""
+        tree = self.query_one("#tree", Tree)
+        node = tree.cursor_node
+        data = self._get(node.data) if node else None
+        if not data:
+            return
+        sids = data.get("session_ids", [])
+        if not sids:
+            return
+        session_id = sids[0]
+        claude = shutil.which("claude")
+        if not claude:
+            self._update_status("Error: 'claude' not found in PATH")
+            return
+
+        with self.suspend():
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+            subprocess.run(
+                [claude, "--resume", session_id],
+                env=env, cwd=self.cwd,
+            )
+        # Reload tree in case the session was modified
+        self.load_tree(select_session=session_id)
 
     # ------------------------------------------------------------------
     # Search (Helix-style: / to open, n/N to navigate, Esc to dismiss)
