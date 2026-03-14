@@ -11,7 +11,7 @@ Canvas Chat UI (SVG canvas, vanilla JS)
     |  SSE / REST
 Canvas Chat FastAPI backend
     |  anyio.open_process
-claude --print --output-format stream-json --resume <session-id>
+claude --print --verbose --output-format stream-json --resume <session-id>
     |
 Claude Code (Max subscription, JSONL on disk)
 ```
@@ -55,8 +55,8 @@ Environment variables (all optional):
 ### Branching
 
 1. Type `/cc explain the auth module` -- creates a human node and streams the AI response.
-2. Select the AI node and type `/cc now explain the tests` -- continues from that point.
-3. Select the same AI node and type `/cc what about error handling` -- branches from the same point, creating a second conversation path.
+2. Select the AI node and type `now explain the tests` -- continues from that point (no `/cc` prefix needed when replying to a Claude Code node).
+3. Select the same AI node and type `what about error handling` -- branches from the same point, creating a second conversation path.
 
 Each AI node shows a colored dot indicating fork status:
 - Green: ready to branch from
@@ -88,8 +88,8 @@ The importer:
 ├── flake.lock
 ├── config.yaml                   # canvas-chat plugin config
 ├── plugins/
-│   ├── claude_code.py            # backend plugin (550 lines)
-│   └── claude-code.js            # frontend plugin (688 lines)
+│   ├── claude_code.py            # backend plugin (~580 lines)
+│   └── claude-code.js            # frontend plugin (~730 lines)
 └── tests/
     └── test_claude_code.py       # 30 tests (459 lines)
 ```
@@ -109,7 +109,7 @@ Registers 4 endpoints on the Canvas Chat FastAPI app:
 | `/api/claude-code/import` | POST | Parse JSONL session into canvas nodes/edges |
 | `/api/claude-code/sessions` | GET | List available sessions |
 
-The chat endpoint spawns `claude --print --output-format stream-json`, translates stdout JSON lines into SSE events, and kills the subprocess on client disconnect. The `CLAUDECODE` env var is stripped to prevent nested session errors.
+The chat endpoint spawns `claude --print --verbose --output-format stream-json`, translates stdout JSON lines into SSE events, and kills the subprocess on client disconnect. The `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` env vars are stripped to prevent nested session errors.
 
 ### Frontend plugin (`claude-code.js`)
 
@@ -121,9 +121,9 @@ Key internal state:
 
 ### Fork-per-message lifecycle
 
-1. User sends `/cc <prompt>`
+1. User sends `/cc <prompt>` (or types a message while a Claude Code node is selected)
 2. Plugin looks up parent node's `forkSessionId` (or starts fresh)
-3. Backend spawns `claude --resume <fork> --print --output-format stream-json "<prompt>"`
+3. Backend spawns `claude --resume <fork> --print --verbose --output-format stream-json "<prompt>"`
 4. stream-json lines become SSE events, content streams into AI node
 5. On completion, backend forks: `claude --resume <sid> --fork-session --print "."`
 6. Plugin stores `{ sessionId, forkSessionId }` for the new AI node

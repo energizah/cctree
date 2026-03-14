@@ -62,12 +62,11 @@ Frontend reads via `readSSEStream()` from `/static/js/sse.js`.
 
 ### Claude Code stream-json format
 
-Each stdout line from `claude --print --output-format stream-json` is a JSON object:
+Requires `--verbose` flag. Each stdout line from `claude --print --verbose --output-format stream-json` is a JSON object:
 ```
-{"type":"assistant","subtype":"text","text":"partial response..."}
-{"type":"assistant","subtype":"tool_use","name":"Read","input":{...}}
-{"type":"assistant","subtype":"tool_result","output":"..."}
-{"type":"result","session_id":"<uuid>","cost_usd":0.01}
+{"type":"assistant","message":{"content":[{"type":"text","text":"partial response..."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{...}}]}}
+{"type":"result","session_id":"<uuid>","total_cost_usd":0.01}
 ```
 
 ### JSONL session format
@@ -90,8 +89,9 @@ External JS plugins access Canvas Chat internals via:
 
 ## Edge cases to be aware of
 
-- `CLAUDECODE` env var must be stripped from subprocess env to avoid nested session errors
+- `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` env vars must be stripped from subprocess env to avoid nested session errors
 - `--dangerously-skip-permissions` is required for non-interactive `--print` mode
+- `stdin=subprocess.DEVNULL` is required when spawning claude from uvicorn (otherwise the CLI hangs waiting on stdin)
 - Fork can fail (network, CLI error) -- frontend falls back to using original session ID
 - Large JSONL files: tool outputs are truncated via `_truncate()` during import
 - The `first_prompt` in session listings strips XML system tags via regex
