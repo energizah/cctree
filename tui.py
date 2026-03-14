@@ -1021,12 +1021,17 @@ class SessionTreeApp(App):
                 node.collapse()
         self._search_expanded.clear()
 
-    def _collect_nodes(self, expand_all: bool = False):
+    def _collect_nodes(self, expand_all: bool = False,
+                       rg_sessions: set[str] | None = None):
         """Walk tree nodes in depth-first order.
 
         If *expand_all* is True, lazily populates collapsed nodes so that
         the entire tree is searchable.  Otherwise only visible (expanded)
         subtrees are walked.
+
+        If *rg_sessions* is provided, subtrees whose sessions don't
+        intersect are pruned during expansion (avoids populating nodes
+        that can't match).
         """
         tree = self.query_one("#tree", Tree)
         nodes = []
@@ -1035,6 +1040,13 @@ class SessionTreeApp(App):
             if node != tree.root:
                 nodes.append(node)
             if expand_all:
+                # Prune: skip expanding subtrees with no matching sessions
+                if rg_sessions is not None and node != tree.root:
+                    data = self._get(node.data) if node.data and node.data != -1 else None
+                    if data:
+                        node_sessions = set(data.get("session_ids", []))
+                        if not node_sessions & rg_sessions:
+                            return
                 self._populate_placeholder(node)
                 for child in node.children:
                     _walk(child)
@@ -1077,24 +1089,89 @@ class SessionTreeApp(App):
                 sessions.add(p.stem)
         return sessions
 
-    def _node_matches(self, node, regex: re.Pattern, rg_sessions: set[str] | None = None) -> bool:
+    def _rg_matching_hashes(self, pattern: str) -> tuple[set[str], set[str]] | None:
+        """Use rg --line-number to find matches, then extract content hashes.
+
+        Returns (session_ids, content_hashes) or None on error.
+        Parses only the matching lines instead of entire files.
+        """
+        rg = shutil.which("rg")
+        if not rg:
+            return None
+        base = _sessions_dir()
+        encoded = _encode_cwd(self.cwd)
+        dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith(encoded)]
+        if not dirs:
+            return set(), set()
+        try:
+            cmd = [rg, "--line-number", "--ignore-case",
+                   "--", pattern] + [str(d) for d in dirs]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode not in (0, 1):
+            return None
+
+        sessions: set[str] = set()
+        hashes: set[str] = set()
+        for line in result.stdout.splitlines():
+            # Format: /path/to/session.jsonl:lineno:json_content
+            colon1 = line.find(":")
+            if colon1 < 0:
+                continue
+            fpath = line[:colon1]
+            p = Path(fpath)
+            if p.suffix == ".jsonl":
+                sessions.add(p.stem)
+            rest = line[colon1 + 1:]
+            colon2 = rest.find(":")
+            if colon2 < 0:
+                continue
+            json_str = rest[colon2 + 1:]
+            try:
+                rec = json.loads(json_str)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            # Compute content_hash the same way _parse_session_file does
+            msg = rec.get("message", {})
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            raw = json.dumps(content, sort_keys=True)
+            h = hashlib.sha256(f"{role}:{raw}".encode()).hexdigest()[:16]
+            hashes.add(h)
+        return sessions, hashes
+
+    def _node_matches(self, node, regex: re.Pattern,
+                      rg_sessions: set[str] | None = None,
+                      rg_hashes: set[str] | None = None) -> bool:
         """Check if a tree node matches the compiled regex."""
         if regex.search(node.label.plain):
             return True
         data = self._get(node.data) if node.data and node.data != -1 else None
         if not data:
             return False
-        # Fast path: if rg found no matching sessions for this node, skip content check
+        # Fast path: if rg found no matching sessions for this node, skip
         if rg_sessions is not None:
             node_sessions = set(data.get("session_ids", []))
             if not node_sessions & rg_sessions:
                 return False
-        # Check all messages in the chain
+        # Fast path: check content_hash against rg results (avoids re-parsing).
+        # Hashes may not match for coalesced messages, so fall through to regex.
+        if rg_hashes is not None:
+            for msg in data.get("msgs") or []:
+                if msg.get("content_hash") in rg_hashes:
+                    return True
+            if not data.get("msgs"):
+                first = data.get("first_msg")
+                if first and first.get("content_hash") in rg_hashes:
+                    return True
+        # Regex match on content
         for msg in data.get("msgs") or []:
             text = _extract_text_content(msg.get("message", {}))
             if regex.search(text):
                 return True
-        # Fallback to first_msg if msgs not populated
         if not data.get("msgs"):
             first = data.get("first_msg")
             if first:
@@ -1231,12 +1308,16 @@ class SessionTreeApp(App):
             self._search_matches = []
             self._search_index = -1
             return
-        rg_sessions = self._rg_matching_sessions(self._search_pattern)
-        nodes = self._collect_nodes(expand_all=expand_all)
+        rg_result = self._rg_matching_hashes(self._search_pattern)
+        if rg_result is not None:
+            rg_sessions, rg_hashes = rg_result
+        else:
+            rg_sessions, rg_hashes = None, None
+        nodes = self._collect_nodes(expand_all=expand_all, rg_sessions=rg_sessions)
         old_node = (self._search_matches[self._search_index]
                     if self._search_matches and 0 <= self._search_index < len(self._search_matches)
                     else None)
-        raw = [n for n in nodes if self._node_matches(n, regex, rg_sessions)]
+        raw = [n for n in nodes if self._node_matches(n, regex, rg_sessions, rg_hashes)]
         # Drill into chain nodes to find the specific child
         self._search_matches = [self._resolve_to_child(n, regex) for n in raw]
         # Deduplicate (a child may appear if both parent chain and child matched)
