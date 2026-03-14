@@ -608,8 +608,15 @@ class SessionTreeApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("ctrl+c", "quit", "Quit", show=False),
+        Binding("t", "recent_next", "Tip"),
+        Binding("T", "recent_prev", "Prev recent tip", show=False),
+        Binding("p", "toggle_detail", "Toggle detail"),
+        Binding("o", "open_session", "Open in claude"),
+        Binding("i", "focus_input", "Chat"),
+        Binding("y", "yank_detail", "Copy detail"),
         Binding("e", "expand_all", "Expand all"),
         Binding("c", "collapse_all", "Collapse all"),
+        Binding("r", "reload", "Reload"),
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
         Binding("h", "collapse_node", "Collapse", show=False),
@@ -618,17 +625,10 @@ class SessionTreeApp(App):
         Binding("ctrl+u", "page_up", "Page up", show=False),
         Binding("g", "go_top", "Top", show=False),
         Binding("G", "go_bottom", "Bottom", show=False),
-        Binding("p", "toggle_detail", "Toggle detail"),
-        Binding("y", "yank_detail", "Copy detail"),
-        Binding("i", "focus_input", "Chat"),
-        Binding("o", "open_session", "Open in claude"),
-        Binding("r", "reload", "Reload"),
         Binding("ctrl+e", "edit_message", "Edit in $EDITOR", show=False),
         Binding("slash", "search", "Search", show=False),
         Binding("n", "search_next", "Next match", show=False),
         Binding("N", "search_prev", "Prev match", show=False),
-        Binding("t", "recent_next", "Tip"),
-        Binding("T", "recent_prev", "Prev recent tip", show=False),
     ]
 
     def __init__(self, cwd: str):
