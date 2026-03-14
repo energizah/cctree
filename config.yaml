@@ -1,0 +1,18 @@
+# canvas-claude: Claude Code integration for Canvas Chat
+#
+# This config is loaded via CANVAS_CHAT_CONFIG_PATH env var.
+# It registers the claude-code plugin without modifying canvas-chat's source.
+#
+# Paths are relative to this file's directory.
+#
+# Canvas Chat requires at least one model entry. This placeholder is never
+# used — all LLM calls go through the Claude Code CLI.
+
+models:
+  - id: claude-code/opus
+    name: Claude Code (CLI)
+
+plugins:
+  - id: claude-code
+    js: ./plugins/claude-code.js
+    py: ./plugins/claude_code.py
