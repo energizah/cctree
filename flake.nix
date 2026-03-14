@@ -36,13 +36,17 @@
               uv venv --python ${python}/bin/python
               uv pip install -e "$CANVAS_CHAT_DIR"
               uv pip install -e "$CANVAS_CHAT_DIR[dev]"
+              uv pip install textual
             fi
 
             source .venv/bin/activate
 
+            alias cc-tree="python $CANVAS_CLAUDE_DIR/tui.py"
+
             echo ""
             echo "canvas-claude dev shell"
             echo "  start server:  uvicorn canvas_chat.app:app --reload --port 7865"
+            echo "  tree viewer:   cc-tree /path/to/project"
             echo "  config:        $CANVAS_CHAT_CONFIG_PATH"
             echo "  canvas-chat:   $CANVAS_CHAT_DIR"
             echo ""

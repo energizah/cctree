@@ -663,6 +663,7 @@ async def claude_code_import_dag(req: ImportDagRequest):
     # -- Tree format: compact text rendering of the DAG --
     if req.format == "tree":
         lines: list[str] = []
+        tree_lines: list[dict] = []
 
         def _preview(msg: dict) -> str:
             """Extract a one-line preview from a message."""
@@ -744,6 +745,7 @@ async def claude_code_import_dag(req: ImportDagRequest):
             entry = render_stack2.pop()
             if entry[0] == "line":
                 lines.append(entry[1])
+                tree_lines.append(entry[2])
                 continue
 
             _, trie_node, prefix = entry
@@ -768,12 +770,28 @@ async def claude_code_import_dag(req: ImportDagRequest):
 
                 if n_msgs == 1:
                     role = "H" if msg["type"] == "user" else "A"
-                    line = f"{prefix}{connector} {role}: {preview}"
+                    text_part = f"{role}: {preview}"
                 else:
-                    line = f"{prefix}{connector} [{n_msgs} msgs] {preview}"
+                    text_part = f"[{n_msgs} msgs] {preview}"
+
+                line = f"{prefix}{connector} {text_part}"
 
                 if count > 1:
                     line += f"  ×{count}"
+
+                # Collect all session IDs across the chain
+                chain_session_ids: set[str] = set()
+                for seg in chain:
+                    chain_session_ids.update(seg["session_ids"])
+
+                tree_line_entry = {
+                    "prefix": prefix,
+                    "connector": connector,
+                    "text": text_part,
+                    "session_ids": sorted(chain_session_ids - {""}),
+                    "count": count,
+                    "msg_count": n_msgs,
+                }
 
                 end_node = chain[-1]
                 child_prefix = prefix + ("   " if last else "│  ")
@@ -781,12 +799,13 @@ async def claude_code_import_dag(req: ImportDagRequest):
                 # Push visit first (will be processed after the line)
                 if end_node["children"]:
                     render_stack2.append(("visit", end_node, child_prefix))
-                render_stack2.append(("line", line))
+                render_stack2.append(("line", line, tree_line_entry))
 
         tree_text = "\n".join(lines)
 
         return {
             "tree": tree_text,
+            "tree_lines": tree_lines,
             "session_count": len(all_sessions),
             "node_count": sum(len(s) for s in all_sessions),
         }

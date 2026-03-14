@@ -13,6 +13,8 @@
  */
 
 import { FeaturePlugin } from '/static/js/feature-plugin.js';
+import { BaseNode } from '/static/js/node-protocols.js';
+import { NodeRegistry } from '/static/js/node-registry.js';
 import { NodeType, EdgeType, createNode, createEdge } from '/static/js/graph-types.js';
 import { readSSEStream } from '/static/js/sse.js';
 import { apiUrl, formatUserError } from '/static/js/utils.js';
@@ -53,6 +55,127 @@ class ForkIndex {
         return idx;
     }
 }
+
+// ---------------------------------------------------------------------------
+// SessionTreeNode — custom node type for interactive session trees
+// ---------------------------------------------------------------------------
+
+class SessionTreeNode extends BaseNode {
+    getTypeLabel() {
+        return 'Session Tree';
+    }
+
+    getTypeIcon() {
+        return '';
+    }
+
+    getSummaryText(canvas) {
+        const title = this.node.title || 'Session Tree';
+        return canvas.truncate(title, 50);
+    }
+
+    renderContent(canvas) {
+        const treeLines = this.node.treeLines || [];
+        const title = this.node.title || 'Session Tree';
+        const sessionCount = this.node.sessionCount || 0;
+        const nodeCount = this.node.nodeCount || 0;
+
+        let html = `<div class="cc-session-tree">`;
+        html += `<div class="cc-tree-header">${canvas.escapeHtml(title)}</div>`;
+        html += `<div class="cc-tree-stats">${sessionCount} sessions, ${nodeCount} messages</div>`;
+
+        for (const line of treeLines) {
+            const sessionId = line.session_ids?.[0] || '';
+            const dataAttr = sessionId ? ` data-session-id="${canvas.escapeHtml(sessionId)}"` : '';
+            const clickClass = sessionId ? ' cc-tree-clickable' : '';
+
+            const prefix = canvas.escapeHtml(line.prefix + line.connector + ' ');
+            const text = canvas.escapeHtml(line.text);
+            const countBadge = line.count > 1
+                ? `<span class="cc-tree-count">\u00d7${line.count}</span>`
+                : '';
+
+            html += `<div class="cc-tree-line${clickClass}"${dataAttr}>`;
+            html += `<span class="cc-tree-prefix">${prefix}</span>`;
+            html += `<span class="cc-tree-text">${text}</span>`;
+            html += countBadge;
+            html += `</div>`;
+        }
+
+        html += `</div>`;
+        return html;
+    }
+
+    getActions() {
+        return [];
+    }
+
+    getEventBindings() {
+        return [
+            {
+                selector: '.cc-tree-line.cc-tree-clickable',
+                multiple: true,
+                handler: (nodeId, e, canvas) => {
+                    const sessionId = e.currentTarget.dataset.sessionId;
+                    if (sessionId) {
+                        canvas.emit('cc-import-session', nodeId, sessionId);
+                    }
+                },
+            },
+        ];
+    }
+
+    isContentEditable() {
+        return false;
+    }
+}
+
+NodeRegistry.register({
+    type: 'session-tree',
+    protocol: SessionTreeNode,
+    defaultSize: { width: 800, height: 600 },
+    css: `
+        .cc-session-tree {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+            font-size: 12px;
+            padding: 12px;
+            line-height: 1.6;
+        }
+        .cc-tree-header {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 4px;
+            color: var(--text-color);
+        }
+        .cc-tree-stats {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+        .cc-tree-line {
+            white-space: pre;
+            padding: 1px 4px;
+            border-radius: 3px;
+        }
+        .cc-tree-line.cc-tree-clickable {
+            cursor: pointer;
+        }
+        .cc-tree-line.cc-tree-clickable:hover {
+            background: #313244;
+        }
+        .cc-tree-prefix {
+            color: #585b70;
+        }
+        .cc-tree-text {
+            color: var(--text-color);
+        }
+        .cc-tree-count {
+            color: var(--text-muted);
+            margin-left: 8px;
+            font-size: 11px;
+        }
+    `,
+});
 
 // ---------------------------------------------------------------------------
 // ClaudeCodeFeature
@@ -317,6 +440,16 @@ class ClaudeCodeFeature extends FeaturePlugin {
         this._saveIndex();
         this.saveSession();
         this.showToast?.(`Expanded ${messages.length} messages`);
+    }
+
+    // -- Canvas event handlers for custom node types --------------------------
+
+    getCanvasEventHandlers() {
+        return {
+            'cc-import-session': (_nodeId, sessionId) => {
+                this._importSession(sessionId);
+            },
+        };
     }
 
     // -- Auto-route replies to Claude Code nodes ------------------------------
@@ -826,24 +959,25 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 throw new Error(detail.detail || `HTTP ${resp.status}`);
             }
 
-            const { tree, session_count, node_count } = await resp.json();
+            const data = await resp.json();
 
-            if (!tree) {
+            if (!data.tree_lines || data.tree_lines.length === 0) {
                 this.showToast?.('No conversation messages found.');
                 return;
             }
 
-            const header = `# Session Tree — ${this.forkIndex.cwd}\n`
-                + `${session_count} sessions, ${node_count} messages\n\n`;
-
-            const content = header + '```\n' + tree + '\n```';
-
-            const node = createNode(NodeType.NOTE, content, {
+            const node = createNode('session-tree', '', {
                 position: this.graph.autoPosition([]),
                 width: 800,
             });
+            node.title = `Session Tree \u2014 ${this.forkIndex.cwd}`;
+            node.treeLines = data.tree_lines;
+            node.sessionCount = data.session_count;
+            node.nodeCount = data.node_count;
             this.graph.addNode(node);
             this.canvas.selectNode(node.id);
+
+            const { session_count, node_count } = data;
 
             this._saveIndex();
             this.saveSession();

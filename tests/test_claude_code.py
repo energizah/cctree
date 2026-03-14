@@ -567,3 +567,55 @@ class TestImportDag:
         assert "[10 msgs]" in tree
         lines = [l for l in tree.split("\n") if l.strip()]
         assert len(lines) == 1
+
+    def test_tree_lines_populated(self, tmp_path, dag_dir):
+        """tree_lines array contains structured data for each tree line."""
+        u1, a1 = str(uuid4()), str(uuid4())
+
+        _write_jsonl(dag_dir / "sess-a.jsonl", [
+            _make_record("user", u1, content="hello", sessionId="sess-a"),
+            _make_record("assistant", a1, parent_uuid=u1, content="world", sessionId="sess-a"),
+        ])
+
+        result = self._run_dag(tmp_path)
+        tree_lines = result["tree_lines"]
+        assert len(tree_lines) >= 1
+
+        line = tree_lines[0]
+        assert "prefix" in line
+        assert "connector" in line
+        assert "text" in line
+        assert "session_ids" in line
+        assert "count" in line
+        assert "msg_count" in line
+        assert "sess-a" in line["session_ids"]
+
+    def test_tree_lines_clickable_branches(self, tmp_path, dag_dir):
+        """Forked sessions produce tree_lines with distinct session_ids."""
+        u1, a1 = str(uuid4()), str(uuid4())
+
+        _write_jsonl(dag_dir / "sess-a.jsonl", [
+            _make_record("user", u1, content="hello", sessionId="sess-a"),
+            _make_record("assistant", a1, parent_uuid=u1, content="hi", sessionId="sess-a"),
+            _make_record("user", str(uuid4()), parent_uuid=a1, content="branch A", sessionId="sess-a"),
+        ])
+
+        _write_jsonl(dag_dir / "sess-b.jsonl", [
+            _make_record("user", u1, content="hello", sessionId="sess-b"),
+            _make_record("assistant", a1, parent_uuid=u1, content="hi", sessionId="sess-b"),
+            _make_record("user", str(uuid4()), parent_uuid=a1, content="branch B", sessionId="sess-b"),
+        ])
+
+        result = self._run_dag(tmp_path)
+        tree_lines = result["tree_lines"]
+
+        # Should have at least 3 lines: shared trunk + 2 branches
+        assert len(tree_lines) >= 3
+
+        # Find the branch lines
+        branch_lines = [tl for tl in tree_lines if "branch" in tl["text"]]
+        assert len(branch_lines) == 2
+
+        # Each branch line should have a session_id
+        for bl in branch_lines:
+            assert len(bl["session_ids"]) >= 1
