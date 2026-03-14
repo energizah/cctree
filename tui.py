@@ -40,8 +40,8 @@ Features:
       fast session-file narrowing, then regex match on message content
     - Search navigation: saves/restores collapse state so expanded
       subtrees are collapsed when moving to the next match
-    - Text-presentation emoji role indicators (✨︎ assistant, ☻ human,
-      🛠︎ tool result)
+    - Emoji role indicators (✨ assistant, 👤 human,
+      🛠️ tool result)
     - Status bar: session metadata (date range, model, session ID)
       on highlighted node
     - Search match highlighting in detail panel
@@ -366,7 +366,7 @@ def _build_trie(cwd: str) -> tuple[dict, int]:
 def _msg_role(msg: dict) -> tuple[str, str]:
     """Return (role_char, style) for a message, distinguishing tool results from human."""
     if msg["type"] == "assistant":
-        return "✨︎", ""
+        return "✨", ""
     # "user" type — check if it's actually a tool_result
     content = msg["message"].get("content", "")
     if isinstance(content, list):
@@ -374,8 +374,8 @@ def _msg_role(msg: dict) -> tuple[str, str]:
             isinstance(b, dict) and b.get("type") == "tool_result"
             for b in content
         ):
-            return "🛠︎", ""
-    return "☻", ""
+            return "🛠️", ""
+    return "👤", ""
 
 
 def _preview(msg: dict) -> str:
@@ -1691,7 +1691,7 @@ class SessionTreeApp(App):
             # Add the pending user message as a new fork branch
             label = Text()
             label.append("⏳ ", style="dim italic")
-            label.append("☻: ", style="bold cyan")
+            label.append("👤: ", style="bold cyan")
             label.append(prompt)
             pending = fork_node.add_leaf(label, data=-2)  # -2 = pending sentinel
 
