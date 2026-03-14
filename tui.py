@@ -1549,10 +1549,15 @@ class SessionTreeApp(App):
             if msg:
                 content_hash = msg.get("content_hash")
 
+        # If the selected node is a session tip (leaf with no children),
+        # we can just resume without forking — no existing continuation to preserve.
+        is_tip = node and not node.allow_expand and not data.get("_trie_node")
+        needs_fork = not is_tip
+
         # Show the user's message in the tree immediately (before worker starts)
         self._add_pending_node(prompt)
 
-        self._stream_chat(prompt, session_id, content_hash)
+        self._stream_chat(prompt, session_id, content_hash, needs_fork)
 
     def on_key(self, event) -> None:
         """Handle special keys from input widgets."""
@@ -1576,13 +1581,14 @@ class SessionTreeApp(App):
 
     @work(thread=True, group="stream_chat")
     def _stream_chat(self, prompt: str, session_id: str | None,
-                     content_hash: str | None = None) -> None:
+                     content_hash: str | None = None,
+                     needs_fork: bool = True) -> None:
         claude = shutil.which("claude")
         if not claude:
             self.call_from_thread(self._update_status, "Error: 'claude' not found in PATH")
             return
 
-        _log.info(f"_stream_chat start sid={session_id} hash={content_hash}")
+        _log.info(f"_stream_chat start sid={session_id} hash={content_hash} fork={needs_fork}")
         self._streaming = True
         self.call_from_thread(self._update_status, "Streaming...")
         chat_input = self.query_one("#chat-input", Input)
@@ -1590,8 +1596,9 @@ class SessionTreeApp(App):
 
         # Fork-rewind-resume: fork the session, rewind the fork to the
         # selected message, then resume from there.
+        # Skip fork when replying to a session tip (no existing continuation).
         resume_id = None
-        if session_id:
+        if session_id and needs_fork:
             self.call_from_thread(self._update_status, "Forking session...")
             _log.info(f"forking {session_id}")
             fork_id = self._fork_session(claude, session_id)
@@ -1611,6 +1618,10 @@ class SessionTreeApp(App):
             else:
                 resume_id = session_id  # fork failed, resume original
                 _log.info(f"fork failed, using original")
+        elif session_id:
+            # Replying to session tip — just resume directly
+            resume_id = session_id
+            _log.info(f"resuming tip session {session_id}")
 
         cmd = [
             claude, "--print", "--verbose", "--output-format", "stream-json",
@@ -1691,12 +1702,11 @@ class SessionTreeApp(App):
 
         with self.batch_update():
             if not node.allow_expand:
-                # Node is a leaf in a chain — split the chain at this point.
+                # Node is a leaf in a chain — check if it's a tip or mid-chain.
                 parent = node.parent
                 if not parent:
                     return
 
-                # Snapshot siblings after the selected node (chain continuation)
                 siblings = list(parent.children)
                 idx = next((i for i, s in enumerate(siblings) if s is node), None)
                 if idx is None:
@@ -1704,28 +1714,29 @@ class SessionTreeApp(App):
                 after = siblings[idx + 1:]
                 n_after = len(after)
 
-                _log.info(f"  splitting chain at idx={idx}, {n_after} siblings after")
+                if n_after == 0:
+                    # Tip node — no continuation to preserve, append as sibling.
+                    fork_node = parent
+                    _log.info(f"  tip node, appending as sibling")
+                else:
+                    # Mid-chain — split into fork with continuation + pending.
+                    _log.info(f"  splitting chain at idx={idx}, {n_after} siblings after")
 
-                # Grab label/data of first continuation sibling for the summary
-                first_after_label = after[0].label if after else None
-                first_after_data = after[0].data if after else None
+                    first_after_label = after[0].label
+                    first_after_data = after[0].data
 
-                # Remove the selected node and everything after it
-                for s in siblings[idx:]:
-                    s.remove()
+                    for s in siblings[idx:]:
+                        s.remove()
 
-                # Re-add selected node as a branch (fork point)
-                fork_node = parent.add(node.label, data=node.data)
+                    fork_node = parent.add(node.label, data=node.data)
 
-                # Collapse continuation into a single summary node
-                if n_after > 0:
                     cont_label = Text()
                     cont_label.append(f"[{n_after} msgs] ", style="bold yellow")
                     cont_label.append_text(first_after_label)
                     cont = fork_node.add(cont_label, data=first_after_data)
                     cont.add_leaf(Text("...", style="dim"), data=-1)
 
-                _log.info(f"  fork_node created, 1 continuation + 1 pending")
+                    _log.info(f"  fork_node created, 1 continuation + 1 pending")
             else:
                 fork_node = node
 
