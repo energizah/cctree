@@ -557,6 +557,7 @@ class SessionTreeApp(App):
         Binding("i", "focus_input", "Chat"),
         Binding("o", "open_session", "Open in claude"),
         Binding("r", "reload", "Reload"),
+        Binding("ctrl+e", "edit_message", "Edit in $EDITOR", show=False),
         Binding("slash", "search", "Search", show=False),
         Binding("n", "search_next", "Next match", show=False),
         Binding("N", "search_prev", "Prev match", show=False),
@@ -586,7 +587,7 @@ class SessionTreeApp(App):
             yield Tree("Sessions", id="tree")
             yield Static("Select a node to view details", id="detail")
         yield Input(
-            placeholder="Send a message (Enter to send, selected node = resume context)",
+            placeholder="Send a message (Enter to send, Ctrl+E to edit in $EDITOR)",
             id="chat-input",
         )
         yield Input(placeholder="/", id="search-input")
@@ -1076,6 +1077,27 @@ class SessionTreeApp(App):
     def action_focus_input(self) -> None:
         self.query_one("#chat-input", Input).focus()
 
+    def action_edit_message(self) -> None:
+        """Open $EDITOR to compose a message, then submit it."""
+        import tempfile
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        chat_input = self.query_one("#chat-input", Input)
+        # Pre-fill temp file with current input content
+        with tempfile.NamedTemporaryFile(
+            suffix=".md", mode="w", delete=False
+        ) as f:
+            f.write(chat_input.value)
+            tmppath = f.name
+        try:
+            with self.app.suspend():
+                subprocess.run([editor, tmppath])
+            text = Path(tmppath).read_text().strip()
+            if text:
+                chat_input.value = text
+                chat_input.focus()
+        finally:
+            Path(tmppath).unlink(missing_ok=True)
+
     def action_open_session(self) -> None:
         """Suspend the TUI and open the selected session in claude --resume."""
         tree = self.query_one("#tree", Tree)
@@ -1518,7 +1540,11 @@ class SessionTreeApp(App):
         self._stream_chat(prompt, session_id, content_hash)
 
     def on_key(self, event) -> None:
-        """Return focus to tree on Escape from input."""
+        """Handle special keys from input widgets."""
+        if event.key == "ctrl+e" and self.focused is self.query_one("#chat-input", Input):
+            event.prevent_default()
+            self.action_edit_message()
+            return
         if event.key == "escape":
             search = self.query_one("#search-input", Input)
             if self.focused is search:
