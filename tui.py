@@ -1091,11 +1091,11 @@ class SessionTreeApp(App):
 
         status.update(" │ ".join(parts))
 
-    async def run_action(self, action, default_namespace=None) -> bool:
+    async def run_action(self, action, *args, **kwargs) -> bool:
         name = action if isinstance(action, str) else action[0]
         if name not in ("recent_next", "recent_prev"):
             self._recent_index = -1
-        return await super().run_action(action, default_namespace)
+        return await super().run_action(action, *args, **kwargs)
 
     def action_cursor_down(self) -> None:
         self._snap("cursor_down")
