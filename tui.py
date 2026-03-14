@@ -337,16 +337,21 @@ def _parse_session_file(path: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _build_trie(cwd: str) -> tuple[dict, int]:
-    """Build a trie from all sessions under cwd.  Returns (trie_root, session_count)."""
+def _build_trie(cwd: str) -> tuple[dict, int, dict[str, str]]:
+    """Build a trie from all sessions under cwd.
+
+    Returns (trie_root, session_count, session_tips) where session_tips
+    maps session_id -> ISO timestamp of the last message in that session.
+    """
     base = _sessions_dir()
     if not base.exists():
-        return {"children": {}, "messages": [], "count": 0, "session_ids": set()}, 0
+        return {"children": {}, "messages": [], "count": 0, "session_ids": set()}, 0, {}
 
     encoded = _encode_cwd(cwd)
     dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith(encoded)]
 
     all_sessions: list[list[dict]] = []
+    session_tips: dict[str, str] = {}  # session_id -> last timestamp
     for d in dirs:
         for jsonl_file in d.glob("*.jsonl"):
             msgs = _parse_session_file(jsonl_file)
@@ -355,9 +360,13 @@ def _build_trie(cwd: str) -> tuple[dict, int]:
                 for msg in msgs:
                     msg["file_session_id"] = file_sid
                 all_sessions.append(msgs)
+                # Track the last timestamp for this session
+                last_ts = msgs[-1].get("timestamp", "")
+                if last_ts:
+                    session_tips[file_sid] = last_ts
 
     if not all_sessions:
-        return {"children": {}, "messages": [], "count": 0, "session_ids": set()}, 0
+        return {"children": {}, "messages": [], "count": 0, "session_ids": set()}, 0, {}
 
     all_sessions.sort(key=len, reverse=True)
 
@@ -378,7 +387,7 @@ def _build_trie(cwd: str) -> tuple[dict, int]:
             node["count"] += 1
             node["session_ids"].add(msg.get("file_session_id", msg["session_id"]))
 
-    return trie_root, len(all_sessions)
+    return trie_root, len(all_sessions), session_tips
 
 
 def _msg_role(msg: dict) -> tuple[str, str]:
@@ -394,6 +403,44 @@ def _msg_role(msg: dict) -> tuple[str, str]:
         ):
             return "🛠️", ""
     return "👤", ""
+
+
+def _age_text(iso_ts: str) -> str:
+    """Return human-readable age string for an ISO timestamp."""
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        delta = datetime.now(timezone.utc) - dt
+        secs = int(delta.total_seconds())
+    except (ValueError, TypeError):
+        return ""
+    if secs < 0:
+        return ""
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def _age_style(tip_ts: str, is_tip: bool) -> str:
+    """Return style for an age label based on session recency.
+
+    Tip node of a recent session: bold green.
+    Ancestor on a recent session's path: green (not bold).
+    Everything else: dim.
+    """
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(tip_ts.replace("Z", "+00:00"))
+        recent = (datetime.now(timezone.utc) - dt).total_seconds() < 3600
+    except (ValueError, TypeError):
+        recent = False
+    if not recent:
+        return "dim"
+    return "bold green" if is_tip else "#98c379"
 
 
 def _preview(msg: dict) -> str:
@@ -587,6 +634,7 @@ class SessionTreeApp(App):
         self.title = f"Claude Code Sessions — {cwd}"
         self.trie_root: dict = {}
         self.session_count = 0
+        self.session_tips: dict[str, str] = {}
         self._pending_detail = None
         self._detail_timer = None
         self._node_data: dict[int, dict] = {}  # id -> heavy data
@@ -626,7 +674,7 @@ class SessionTreeApp(App):
     def load_tree(self, select_session: str | None = None) -> None:
         """Parse sessions in a worker thread so the UI stays responsive."""
         _log.info(f"load_tree start select={select_session and select_session[:8]}")
-        self.trie_root, self.session_count = _build_trie(self.cwd)
+        self.trie_root, self.session_count, self.session_tips = _build_trie(self.cwd)
         _log.info(f"load_tree trie built")
         self.call_from_thread(self._render_tree, select_session)
 
@@ -795,10 +843,21 @@ class SessionTreeApp(App):
                 msg = seg["messages"][0]
                 preview_text = _preview(msg)
                 role, role_style = _msg_role(msg)
-                msg_label = Text()
-                msg_label.append(f"{role}: ", style=role_style)
-                msg_label.append(preview_text)
                 seg_session_ids = sorted(seg["session_ids"] - {""})
+
+                # Age prefix — message's own timestamp, styled by session recency
+                msg_ts = msg.get("timestamp", "")
+                best_tip_ts = max(
+                    (self.session_tips.get(sid, "") for sid in seg_session_ids),
+                    default="",
+                )
+                msg_label = Text()
+                is_tip = (seg is chain[-1]) and not trie_node
+                msg_age = _age_text(msg_ts)
+                if msg_age:
+                    style = _age_style(best_tip_ts, is_tip)
+                    msg_label.append(f"({msg_age}) ", style=style)
+
                 msg_data = {
                     "session_ids": seg_session_ids,
                     "first_msg": msg,
@@ -812,15 +871,16 @@ class SessionTreeApp(App):
                     # Last segment gets trie branches as children
                     n_branches = len(trie_node["children"])
                     if n_branches > 1:
-                        branch_label = Text()
-                        branch_label.append(f"[{n_branches} branches] ", style="bold yellow")
-                        branch_label.append_text(msg_label)
-                        msg_label = branch_label
+                        msg_label.append(f"[{n_branches} branches] ", style="bold yellow")
+                    msg_label.append(f"{role}: ", style=role_style)
+                    msg_label.append(preview_text)
                     msg_data["_trie_node"] = trie_node
                     nid = self._store(msg_data)
                     last_node = node.add(msg_label, data=nid)
                     last_node.add_leaf(Text("...", style="dim"), data=-1)
                 else:
+                    msg_label.append(f"{role}: ", style=role_style)
+                    msg_label.append(preview_text)
                     nid = self._store(msg_data)
                     node.add_leaf(msg_label, data=nid)
             data["chain"] = None
@@ -852,7 +912,26 @@ class SessionTreeApp(App):
             end_node = chain[-1]
             role, role_style = _msg_role(msg)
             n_branches = len(end_node["children"])
+            has_children = bool(end_node["children"])
+
+            chain_session_ids: set[str] = set()
+            for seg in chain:
+                chain_session_ids.update(seg["session_ids"])
+            chain_session_ids.discard("")
+
             label = Text()
+
+            # Age prefix — message's own timestamp, styled by session recency
+            msg_ts = msg.get("timestamp", "")
+            best_tip_ts = max(
+                (self.session_tips.get(sid, "") for sid in chain_session_ids),
+                default="",
+            )
+            msg_age = _age_text(msg_ts)
+            if msg_age:
+                style = _age_style(best_tip_ts, n_msgs == 1 and not has_children)
+                label.append(f"({msg_age}) ", style=style)
+
             if n_msgs == 1 and n_branches > 1:
                 label.append(f"[{n_branches} branches] ", style="bold yellow")
                 label.append(f"{role}: ", style=role_style)
@@ -867,12 +946,6 @@ class SessionTreeApp(App):
 
             if count > 1:
                 label.append(f"  \u00d7{count}", style="dim")
-
-            chain_session_ids: set[str] = set()
-            for seg in chain:
-                chain_session_ids.update(seg["session_ids"])
-            chain_session_ids.discard("")
-            has_children = bool(end_node["children"])
 
             all_msgs = [seg["messages"][0] for seg in chain]
             data = {
@@ -1763,7 +1836,7 @@ class SessionTreeApp(App):
         Unlike load_tree (which uses @work), this avoids worker group
         cancellation issues when called during streaming.
         """
-        self.trie_root, self.session_count = _build_trie(self.cwd)
+        self.trie_root, self.session_count, self.session_tips = _build_trie(self.cwd)
         self.call_from_thread(self._render_tree, select_session)
 
     def _fork_session(self, claude: str, session_id: str) -> str | None:
