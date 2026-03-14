@@ -77,6 +77,25 @@ The importer:
 - Detects branches (multiple children of the same parent) and uses branch edges
 - Lays out the tree via DFS with depth-based x positioning
 
+## TUI session tree viewer (`tui.py` / `cctree`)
+
+A standalone Textual TUI for browsing all Claude Code sessions under a project directory. Builds a trie from JSONL session files to detect shared prefixes (forks) and collapse linear chains.
+
+```bash
+cctree /path/to/project     # or just: cctree (uses cwd)
+cctree --log                # enable logging/screenshots to temp dir
+```
+
+Key features:
+- **Trie-based merging**: shared message prefixes deduplicated, forks shown as branches
+- **Lazy expansion**: chain segments populated on first expand
+- **Chat input** (`i`): fork-rewind-resume via Claude CLI; tip replies skip forking
+- **Compose in editor** (`Ctrl-e`): open `$EDITOR` to write messages
+- **Search** (`/`): incremental label search + rg-backed full content search (`n`/`N`)
+- **Recent tips** (`f`/`F`): navigate session endpoints sorted by recency
+- **Message age**: timestamps on all nodes, color-coded by session recency
+- **Detail panel** (`p`): sequential messages with syntax-highlighted code blocks
+
 ## Project structure
 
 ```
@@ -87,11 +106,14 @@ The importer:
 ├── flake.nix                     # nix develop shell
 ├── flake.lock
 ├── config.yaml                   # canvas-chat plugin config
+├── tui.py                        # TUI session tree viewer (cctree)
+├── dump_screenshots.py           # screenshot analysis tool
 ├── plugins/
 │   ├── claude_code.py            # backend plugin (~580 lines)
 │   └── claude-code.js            # frontend plugin (~730 lines)
 └── tests/
-    └── test_claude_code.py       # 30 tests (459 lines)
+    ├── test_claude_code.py       # 30 tests (459 lines)
+    └── test_tui.py               # TUI tests
 ```
 
 Canvas Chat source at `~/lib/canvas-chat/` is not modified. Everything is loaded externally via the plugin system.

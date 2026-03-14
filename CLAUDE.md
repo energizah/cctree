@@ -28,7 +28,10 @@ The `nix develop` shell sets `CANVAS_CHAT_CONFIG_PATH` automatically. `LD_LIBRAR
 
 - `plugins/claude_code.py` -- Backend. Registers REST/SSE endpoints on the Canvas Chat FastAPI app. Imports `app` from `canvas_chat.app` at module level.
 - `plugins/claude-code.js` -- Frontend. `ClaudeCodeFeature extends FeaturePlugin`. Self-registers via `window.addEventListener('app-plugin-system-ready', ...)`.
+- `tui.py` -- Standalone TUI session tree viewer (`cctree`). Textual app that builds a trie from JSONL session files. Supports chat input (fork-rewind-resume), search (rg-backed), recent tip navigation, and `$EDITOR` composition.
+- `dump_screenshots.py` -- Extracts and displays tree sections from TUI SVG screenshots for debugging.
 - `tests/test_claude_code.py` -- 30 tests. Uses `tmp_path`, mocks filesystem. No server or CLI needed.
+- `tests/test_tui.py` -- TUI tests for `_select_session` fork-point expansion.
 - `config.yaml` -- Points Canvas Chat to the plugin files. Must have at least one model entry (placeholder, never used).
 - `flake.nix` -- Nix dev shell. Python 3.11, uv, ruff, nodejs, libstdc++.
 - `PLAN.md` -- Design document with architecture, data formats, edge cases.
@@ -86,6 +89,7 @@ External JS plugins access Canvas Chat internals via:
 - Async endpoint functions are called directly with `asyncio.get_event_loop().run_until_complete()`
 - Mock `_find_session_file` and `_sessions_dir` to use `tmp_path` fixtures
 - No mocking of the Claude CLI -- test the parsing/conversion logic only
+- TUI tests use Textual's `app.run_test()` with `pytest-asyncio`; poll `session_count` for worker completion
 
 ## Edge cases to be aware of
 
