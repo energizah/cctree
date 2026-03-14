@@ -594,6 +594,10 @@ class SessionTreeApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Clear old screenshots
+        if _SCREENSHOT_DIR.exists():
+            for f in _SCREENSHOT_DIR.glob("*.svg"):
+                f.unlink()
         self._snap(f"mounted cwd={self.cwd}")
         tree = self.query_one("#tree", Tree)
         tree.root.set_label(Text(f" {self.cwd}", style="bold"))
