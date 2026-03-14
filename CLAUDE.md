@@ -17,8 +17,6 @@ pytest tests/ -v
 ruff check tui.py tests/
 ```
 
-`cd` is unreliable in Claude's shell -- use full paths instead (e.g., `git -C /path/to/repo`).
-
 ## File layout
 
 - `tui.py` -- Standalone TUI session tree viewer (`cctree`). Textual app that builds a trie from JSONL session files. Supports chat input (fork-rewind-resume), search (rg-backed), recent tip navigation, and `$EDITOR` composition.
@@ -30,7 +28,7 @@ ruff check tui.py tests/
 
 ### JSONL session format
 
-Files at `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`. Key record types: `user`, `assistant`, `file-history-snapshot`, `system`. Tree structure via `parentUuid`. Multiple consecutive assistant records with chained `parentUuid` are parts of the same turn -- coalesce into one canvas node.
+Files at `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`. Key record types: `user`, `assistant`, `file-history-snapshot`, `system`. Tree structure via `parentUuid`. Multiple consecutive assistant records with chained `parentUuid` are parts of the same turn -- coalesce into one node.
 
 ## Testing conventions
 

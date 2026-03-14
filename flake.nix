@@ -33,7 +33,7 @@
 
             source .venv/bin/activate
 
-            alias cctree="python ''${CANVAS_CLAUDE_DIR:-$HOME/src/canvas-claude}/tui.py"
+            alias cctree="python tui.py"
 
             echo ""
             echo "cctree dev shell"

@@ -25,8 +25,8 @@ Prerequisites:
 - Nix (for the dev shell)
 
 ```bash
-git clone <this-repo> ~/src/canvas-claude
-cd ~/src/canvas-claude
+git clone <this-repo>
+cd cctree
 nix develop
 ```
 
