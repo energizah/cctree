@@ -1676,9 +1676,9 @@ class SessionTreeApp(App):
 
             # Add the pending user message as a new fork branch
             label = Text()
+            label.append("⏳ ", style="dim italic")
             label.append("☻: ", style="bold cyan")
             label.append(prompt)
-            label.append("  ⏳", style="dim italic")
             pending = fork_node.add_leaf(label, data=-2)  # -2 = pending sentinel
 
         def _expand():
