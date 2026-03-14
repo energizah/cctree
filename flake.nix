@@ -18,9 +18,11 @@
             pkgs.uv
             pkgs.ruff
             pkgs.nodejs
+            pkgs.stdenv.cc.cc.lib   # libstdc++ for tokenizers
           ];
 
           shellHook = ''
+            export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
             export CANVAS_CHAT_DIR="''${CANVAS_CHAT_DIR:-$HOME/lib/canvas-chat}"
 
             # Resolve project dir: prefer CANVAS_CLAUDE_DIR, fall back to
