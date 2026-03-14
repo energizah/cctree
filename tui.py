@@ -1,13 +1,56 @@
 """Claude Code Session Tree TUI.
 
 Interactive terminal tree view of all Claude Code sessions under a working
-directory.  Reuses the backend's trie-building logic to detect forks and
-collapse linear chains, then renders the result in a Textual Tree widget
-with clickable nodes that import sessions.
+directory.  Builds a trie from JSONL session files to detect shared prefixes
+(forks) and collapse linear chains, then renders the result in a Textual
+Tree widget.
 
 Usage:
-    python tui.py /path/to/project
-    python tui.py                    # uses cwd
+    cc-tree /path/to/project
+    cc-tree                          # uses cwd
+    cc-tree --help / --version
+
+Keybindings:
+    j/k         cursor down/up
+    h/l         collapse/expand node
+    Ctrl-d/u    page down/up
+    g/G         top/bottom
+    e/c         expand all / collapse all
+    p           toggle detail panel
+    y           copy detail to clipboard
+    i           focus chat input
+    /           search (incremental on labels, Enter for full content)
+    n/N         next/prev search match (expands collapsed nodes)
+    Escape      cancel search or return to tree from input
+    q           quit
+
+Features:
+    - Trie-based session merging: shared message prefixes across sessions
+      are deduplicated, forks shown as branches
+    - Lazy expansion: chain segments and trie children are populated on
+      first expand, keeping startup fast
+    - Detail panel: shows sequential messages up to viewport height with
+      syntax-highlighted code blocks (Pygments via Rich)
+    - Chat input (i): send a prompt that forks the selected session,
+      rewinds to the selected message, and resumes via claude --print
+    - Search (/): Helix-style incremental search on labels while typing;
+      Enter or n/N triggers full content search backed by rg/grep for
+      fast session-file narrowing, then regex match on message content
+    - Search navigation: saves/restores collapse state so expanded
+      subtrees are collapsed when moving to the next match
+    - Text-presentation emoji role indicators (✨︎ assistant, ☻ human,
+      🛠︎ tool result)
+
+Ideas / TODO:
+    - Session metadata in status bar (date range, cost, model)
+    - r to reload sessions without restarting
+    - Filter by date (today, this week, etc.)
+    - o to open selected session in claude --resume
+    - d to diff two selected nodes at a fork point
+    - Cost summary across sessions
+    - Bookmarks (m to mark, ' to jump)
+    - w to export conversation to markdown
+    - Highlight search matches in the detail panel
 """
 
 import hashlib
@@ -25,11 +68,6 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import Footer, Header, Input, Static, Tree
 from textual import work
-
-
-# ---------------------------------------------------------------------------
-# Pure helpers (copied from plugins/claude_code.py to avoid importing FastAPI)
-# ---------------------------------------------------------------------------
 
 
 def _encode_cwd(cwd: str) -> str:
