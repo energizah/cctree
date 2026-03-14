@@ -17,7 +17,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from rich.text import Text
@@ -532,13 +531,16 @@ class SessionTreeApp(App):
         status.update(" Loading sessions...")
         self.load_tree()
 
-    @work(thread=True)
+    @work(thread=True, group="load_tree")
     def load_tree(self, select_session: str | None = None) -> None:
         """Parse sessions in a worker thread so the UI stays responsive."""
+        self.log.info(f"[{self._ts()}] load_tree start select={select_session and select_session[:8]}")
         self.trie_root, self.session_count = _build_trie(self.cwd)
+        self.log.info(f"[{self._ts()}] load_tree trie built")
         self.call_from_thread(self._render_tree, select_session)
 
     def _render_tree(self, select_session: str | None = None) -> None:
+        self.log.info(f"[{self._ts()}] _render_tree start select={select_session and select_session[:8]}")
         tree = self.query_one("#tree", Tree)
         tree.root.remove_children()
         self._add_trie_children(tree.root, self.trie_root)
@@ -546,6 +548,7 @@ class SessionTreeApp(App):
         status = self.query_one("#status", Static)
         node_count = self._count_nodes(self.trie_root)
         status.update(f" {self.session_count} sessions, {node_count} messages")
+        self.log.info(f"[{self._ts()}] _render_tree done")
 
         if select_session:
             self._select_session(select_session)
@@ -575,6 +578,7 @@ class SessionTreeApp(App):
 
     def _select_session(self, session_id: str) -> None:
         """Expand the tree along the path of a session and select the deepest node."""
+        self.log.info(f"[{self._ts()}] _select_session {session_id[:8]}")
         tree = self.query_one("#tree", Tree)
 
         def _walk(node):
@@ -854,6 +858,9 @@ class SessionTreeApp(App):
             if msg:
                 content_hash = msg.get("content_hash")
 
+        # Show the user's message in the tree immediately (before worker starts)
+        self._add_pending_node(prompt)
+
         self._stream_chat(prompt, session_id, content_hash)
 
     def on_key(self, event) -> None:
@@ -861,7 +868,12 @@ class SessionTreeApp(App):
         if event.key == "escape" and self.focused is self.query_one("#chat-input", Input):
             self.query_one("#tree", Tree).focus()
 
-    @work(thread=True)
+    def _ts(self) -> str:
+        """Return a compact timestamp for logging."""
+        from datetime import datetime
+        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+    @work(thread=True, group="stream_chat")
     def _stream_chat(self, prompt: str, session_id: str | None,
                      content_hash: str | None = None) -> None:
         claude = shutil.which("claude")
@@ -869,6 +881,7 @@ class SessionTreeApp(App):
             self.call_from_thread(self._update_status, "Error: 'claude' not found in PATH")
             return
 
+        self.log.info(f"[{self._ts()}] _stream_chat start sid={session_id} hash={content_hash}")
         self._streaming = True
         self.call_from_thread(self._update_status, "Streaming...")
         chat_input = self.query_one("#chat-input", Input)
@@ -879,18 +892,24 @@ class SessionTreeApp(App):
         resume_id = None
         if session_id:
             self.call_from_thread(self._update_status, "Forking session...")
+            self.log.info(f"[{self._ts()}] forking {session_id}")
             fork_id = self._fork_session(claude, session_id)
+            self.log.info(f"[{self._ts()}] fork done -> {fork_id}")
             if fork_id and content_hash:
                 # Rewind the forked copy to the target message
                 fork_path = _find_session_file(fork_id, self.cwd)
+                self.log.info(f"[{self._ts()}] rewinding {fork_id} to {content_hash}")
                 if fork_path and _rewind_session_file(fork_path, content_hash):
                     resume_id = fork_id
+                    self.log.info(f"[{self._ts()}] rewind ok")
                 else:
                     resume_id = fork_id  # rewind failed, resume from tip
+                    self.log.info(f"[{self._ts()}] rewind failed, using tip")
             elif fork_id:
                 resume_id = fork_id
             else:
                 resume_id = session_id  # fork failed, resume original
+                self.log.info(f"[{self._ts()}] fork failed, using original")
 
         cmd = [
             claude, "--print", "--verbose", "--output-format", "stream-json",
@@ -904,15 +923,10 @@ class SessionTreeApp(App):
                if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
 
         try:
+            self.log.info(f"[{self._ts()}] launching claude CLI")
             process = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=env, cwd=self.cwd,
-            )
-
-            # Wait for CLI to write the user message, then reload tree
-            time.sleep(0.5)
-            self.call_from_thread(
-                self.load_tree, select_session=resume_id or None,
             )
 
             text_so_far = ""
@@ -925,19 +939,22 @@ class SessionTreeApp(App):
                 except json.JSONDecodeError:
                     continue
 
-                if event.get("type") == "assistant":
+                etype = event.get("type")
+                if etype == "assistant":
                     for block in event.get("message", {}).get("content", []):
                         if block.get("type") == "text":
                             text_so_far += block.get("text", "")
                             self.call_from_thread(self._update_response, text_so_far)
                         elif block.get("type") == "tool_use":
+                            self.log.info(f"[{self._ts()}] tool_use: {block.get('name', '')}")
                             self.call_from_thread(
                                 self._update_status,
                                 f"Using tool: {block.get('name', '')}",
                             )
-                elif event.get("type") == "result":
+                elif etype == "result":
                     sid = event.get("session_id")
                     cost = event.get("total_cost_usd")
+                    self.log.info(f"[{self._ts()}] result sid={sid and sid[:8]} cost={cost}")
                     self.call_from_thread(self._finish_response, sid, cost)
 
             process.wait()
@@ -950,6 +967,37 @@ class SessionTreeApp(App):
         finally:
             self._streaming = False
             self.call_from_thread(setattr, chat_input, "disabled", False)
+
+    def _add_pending_node(self, prompt: str) -> None:
+        """Add a temporary node showing the user's message under the current cursor."""
+        tree = self.query_one("#tree", Tree)
+        node = tree.cursor_node
+        if not node or node is tree.root:
+            return
+
+        # Expand the current node if needed so the new child is visible
+        self._populate_placeholder(node)
+        if not node.allow_expand:
+            # Convert leaf to branch by re-adding it — too complex.
+            # Instead, just add to the parent.
+            node = node.parent or tree.root
+
+        label = Text()
+        label.append("H: ", style="bold cyan")
+        label.append(prompt)
+        label.append("  ...", style="dim italic")
+        pending = node.add_leaf(label, data=-2)  # -2 = pending sentinel
+        node.expand()
+        tree.select_node(pending)
+
+    def _reload_tree_inline(self, select_session: str | None = None) -> None:
+        """Rebuild trie in current thread and render on main thread.
+
+        Unlike load_tree (which uses @work), this avoids worker group
+        cancellation issues when called during streaming.
+        """
+        self.trie_root, self.session_count = _build_trie(self.cwd)
+        self.call_from_thread(self._render_tree, select_session)
 
     def _fork_session(self, claude: str, session_id: str) -> str | None:
         """Fork a session via the CLI, returning the new session ID."""
@@ -993,6 +1041,7 @@ class SessionTreeApp(App):
         status.update(f" {text}")
 
     def _finish_response(self, session_id: str | None, cost: float | None) -> None:
+        self.log.info(f"[{self._ts()}] _finish_response sid={session_id and session_id[:8]} cost={cost}")
         parts = []
         if session_id:
             parts.append(f"session={session_id[:8]}")
