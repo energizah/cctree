@@ -51,12 +51,19 @@ Ideas / TODO:
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+_log = logging.getLogger("cc-tree")
+_log.setLevel(logging.DEBUG)
+_log_handler = logging.FileHandler(Path(__file__).parent / "cc-tree.log")
+_log_handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", datefmt="%H:%M:%S"))
+_log.addHandler(_log_handler)
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -580,6 +587,7 @@ class SessionTreeApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        _log.info(f"mounted cwd={self.cwd}")
         tree = self.query_one("#tree", Tree)
         tree.root.set_label(Text(f" {self.cwd}", style="bold"))
         tree.root.expand()
@@ -591,13 +599,13 @@ class SessionTreeApp(App):
     @work(thread=True, group="load_tree")
     def load_tree(self, select_session: str | None = None) -> None:
         """Parse sessions in a worker thread so the UI stays responsive."""
-        self.log.info(f"[{self._ts()}] load_tree start select={select_session and select_session[:8]}")
+        _log.info(f"load_tree start select={select_session and select_session[:8]}")
         self.trie_root, self.session_count = _build_trie(self.cwd)
-        self.log.info(f"[{self._ts()}] load_tree trie built")
+        _log.info(f"load_tree trie built")
         self.call_from_thread(self._render_tree, select_session)
 
     def _render_tree(self, select_session: str | None = None) -> None:
-        self.log.info(f"[{self._ts()}] _render_tree start select={select_session and select_session[:8]}")
+        _log.info(f"_render_tree start select={select_session and select_session[:8]}")
         tree = self.query_one("#tree", Tree)
         tree.root.remove_children()
         self._add_trie_children(tree.root, self.trie_root)
@@ -606,7 +614,7 @@ class SessionTreeApp(App):
         status = self.query_one("#status", Static)
         node_count = self._count_nodes(self.trie_root)
         status.update(f" {self.session_count} sessions, {node_count} messages")
-        self.log.info(f"[{self._ts()}] _render_tree done")
+        _log.info(f"_render_tree done")
 
         if select_session:
             self._select_session(select_session)
@@ -636,7 +644,7 @@ class SessionTreeApp(App):
 
     def _select_session(self, session_id: str) -> None:
         """Expand the tree along the path of a session and select the deepest node."""
-        self.log.info(f"[{self._ts()}] _select_session {session_id[:8]}")
+        _log.info(f"_select_session {session_id[:8]}")
         tree = self.query_one("#tree", Tree)
 
         def _walk(node):
@@ -672,6 +680,7 @@ class SessionTreeApp(App):
         if len(children) != 1 or children[0].data != -1:
             return  # already populated
 
+        _log.info(f"populate node={node.data} label={node.label.plain[:40]}")
         children[0].remove()
 
         chain = data.get("chain")
@@ -776,11 +785,12 @@ class SessionTreeApp(App):
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
         """Lazily populate children on first expand."""
+        _log.info(f"expanded node={event.node.data} label={event.node.label.plain[:40]}")
         self._populate_placeholder(event.node)
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         """Show message detail when cursor moves to a node."""
-        self.log.info(f"highlighted: node.data={event.node.data}")
+        _log.info(f"highlighted: node.data={event.node.data}")
         data = self._get(event.node.data)
         self._pending_detail = data
         if self._detail_timer:
@@ -789,7 +799,7 @@ class SessionTreeApp(App):
         self._update_status_bar(data)
 
     def _flush_detail(self) -> None:
-        self.log.info("flush_detail fired")
+        _log.info("flush_detail fired")
         detail = self.query_one("#detail", Static)
         data = self._pending_detail
         if not data:
@@ -881,12 +891,12 @@ class SessionTreeApp(App):
         status.update(" │ ".join(parts))
 
     def action_cursor_down(self) -> None:
-        self.log.info("cursor_down")
+        _log.info("cursor_down")
         tree = self.query_one("#tree", Tree)
         tree.action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        self.log.info("cursor_up")
+        _log.info("cursor_up")
         tree = self.query_one("#tree", Tree)
         tree.action_cursor_up()
 
@@ -941,8 +951,10 @@ class SessionTreeApp(App):
     def action_toggle_detail(self) -> None:
         detail = self.query_one("#detail", Static)
         detail.display = not detail.display
+        _log.info(f"detail panel {'shown' if detail.display else 'hidden'}")
 
     def action_yank_detail(self) -> None:
+        _log.info("yank_detail")
         tree = self.query_one("#tree", Tree)
         node = tree.cursor_node
         data = self._get(node.data) if node else None
@@ -970,6 +982,7 @@ class SessionTreeApp(App):
         tree = self.query_one("#tree", Tree)
         node = tree.cursor_node
         data = self._get(node.data) if node else None
+        _log.info(f"open_session node={node and node.data} sids={data and data.get('session_ids', [])}")
         if not data:
             return
         sids = data.get("session_ids", [])
@@ -993,6 +1006,7 @@ class SessionTreeApp(App):
 
     def action_reload(self) -> None:
         """Reload sessions from disk."""
+        _log.info("reload")
         self._loading = True
         status = self.query_one("#status", Static)
         status.update(" Reloading sessions...")
@@ -1010,6 +1024,7 @@ class SessionTreeApp(App):
     # ------------------------------------------------------------------
 
     def action_search(self) -> None:
+        _log.info("search opened")
         search = self.query_one("#search-input", Input)
         search.display = True
         search.value = ""
@@ -1077,6 +1092,7 @@ class SessionTreeApp(App):
 
     def _rg_matching_sessions(self, pattern: str) -> set[str] | None:
         """Use rg to find session files containing pattern.  Returns session IDs or None on error."""
+        _log.info(f"_rg_matching_sessions pattern={pattern!r}")
         rg = shutil.which("rg") or shutil.which("grep")
         if not rg:
             return None
@@ -1113,6 +1129,7 @@ class SessionTreeApp(App):
         Returns (session_ids, content_hashes) or None on error.
         Parses only the matching lines instead of entire files.
         """
+        _log.info(f"_rg_matching_hashes pattern={pattern!r}")
         rg = shutil.which("rg")
         if not rg:
             return None
@@ -1207,6 +1224,7 @@ class SessionTreeApp(App):
 
     def _run_search(self, pattern: str, forward: bool = True) -> None:
         """Find all nodes matching pattern and jump to the first one."""
+        _log.info(f"_run_search pattern={pattern!r}")
         if not pattern:
             self._search_matches = []
             self._search_index = -1
@@ -1321,6 +1339,7 @@ class SessionTreeApp(App):
 
     def _refresh_matches(self, expand_all: bool = False) -> None:
         """Re-collect matches, preserving current position."""
+        _log.info(f"_refresh_matches pattern={self._search_pattern!r} expand_all={expand_all}")
         regex = self._compile_pattern(self._search_pattern)
         if not regex:
             self._search_matches = []
@@ -1329,9 +1348,12 @@ class SessionTreeApp(App):
         rg_result = self._rg_matching_hashes(self._search_pattern)
         if rg_result is not None:
             rg_sessions, rg_hashes = rg_result
+            _log.info(f"  rg: {len(rg_sessions)} sessions, {len(rg_hashes)} hashes")
         else:
             rg_sessions, rg_hashes = None, None
+            _log.info("  rg: unavailable")
         nodes = self._collect_nodes(expand_all=expand_all, rg_sessions=rg_sessions)
+        _log.info(f"  collected {len(nodes)} nodes")
         old_node = (self._search_matches[self._search_index]
                     if self._search_matches and 0 <= self._search_index < len(self._search_matches)
                     else None)
@@ -1377,6 +1399,7 @@ class SessionTreeApp(App):
         if not prompt or self._streaming:
             return
         event.input.value = ""
+        _log.info(f"chat submit: {prompt[:60]!r}")
 
         # Get session_id and content_hash from selected tree node (if any)
         tree = self.query_one("#tree", Tree)
@@ -1410,10 +1433,6 @@ class SessionTreeApp(App):
             if self.focused is self.query_one("#chat-input", Input):
                 self.query_one("#tree", Tree).focus()
 
-    def _ts(self) -> str:
-        """Return a compact timestamp for logging."""
-        from datetime import datetime
-        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
     @work(thread=True, group="stream_chat")
     def _stream_chat(self, prompt: str, session_id: str | None,
@@ -1423,7 +1442,7 @@ class SessionTreeApp(App):
             self.call_from_thread(self._update_status, "Error: 'claude' not found in PATH")
             return
 
-        self.log.info(f"[{self._ts()}] _stream_chat start sid={session_id} hash={content_hash}")
+        _log.info(f"_stream_chat start sid={session_id} hash={content_hash}")
         self._streaming = True
         self.call_from_thread(self._update_status, "Streaming...")
         chat_input = self.query_one("#chat-input", Input)
@@ -1434,24 +1453,24 @@ class SessionTreeApp(App):
         resume_id = None
         if session_id:
             self.call_from_thread(self._update_status, "Forking session...")
-            self.log.info(f"[{self._ts()}] forking {session_id}")
+            _log.info(f"forking {session_id}")
             fork_id = self._fork_session(claude, session_id)
-            self.log.info(f"[{self._ts()}] fork done -> {fork_id}")
+            _log.info(f"fork done -> {fork_id}")
             if fork_id and content_hash:
                 # Rewind the forked copy to the target message
                 fork_path = _find_session_file(fork_id, self.cwd)
-                self.log.info(f"[{self._ts()}] rewinding {fork_id} to {content_hash}")
+                _log.info(f"rewinding {fork_id} to {content_hash}")
                 if fork_path and _rewind_session_file(fork_path, content_hash):
                     resume_id = fork_id
-                    self.log.info(f"[{self._ts()}] rewind ok")
+                    _log.info(f"rewind ok")
                 else:
                     resume_id = fork_id  # rewind failed, resume from tip
-                    self.log.info(f"[{self._ts()}] rewind failed, using tip")
+                    _log.info(f"rewind failed, using tip")
             elif fork_id:
                 resume_id = fork_id
             else:
                 resume_id = session_id  # fork failed, resume original
-                self.log.info(f"[{self._ts()}] fork failed, using original")
+                _log.info(f"fork failed, using original")
 
         cmd = [
             claude, "--print", "--verbose", "--output-format", "stream-json",
@@ -1465,7 +1484,7 @@ class SessionTreeApp(App):
                if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
 
         try:
-            self.log.info(f"[{self._ts()}] launching claude CLI")
+            _log.info(f"launching claude CLI")
             process = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, env=env, cwd=self.cwd,
@@ -1488,7 +1507,7 @@ class SessionTreeApp(App):
                             text_so_far += block.get("text", "")
                             self.call_from_thread(self._update_response, text_so_far)
                         elif block.get("type") == "tool_use":
-                            self.log.info(f"[{self._ts()}] tool_use: {block.get('name', '')}")
+                            _log.info(f"tool_use: {block.get('name', '')}")
                             self.call_from_thread(
                                 self._update_status,
                                 f"Using tool: {block.get('name', '')}",
@@ -1496,7 +1515,7 @@ class SessionTreeApp(App):
                 elif etype == "result":
                     sid = event.get("session_id")
                     cost = event.get("total_cost_usd")
-                    self.log.info(f"[{self._ts()}] result sid={sid and sid[:8]} cost={cost}")
+                    _log.info(f"result sid={sid and sid[:8]} cost={cost}")
                     self.call_from_thread(self._finish_response, sid, cost)
 
             process.wait()
@@ -1511,26 +1530,67 @@ class SessionTreeApp(App):
             self.call_from_thread(setattr, chat_input, "disabled", False)
 
     def _add_pending_node(self, prompt: str) -> None:
-        """Add a temporary node showing the user's message under the current cursor."""
+        """Add a temporary fork at the selected node showing the user's message.
+
+        Splits the chain: selected node becomes a branch, existing
+        continuation and the new message appear as children (visualizing
+        the fork before the CLI is even invoked).
+        """
         tree = self.query_one("#tree", Tree)
         node = tree.cursor_node
         if not node or node is tree.root:
+            _log.info("_add_pending_node: no cursor node")
             return
 
-        # Expand the current node if needed so the new child is visible
+        _log.info(f"_add_pending_node: prompt={prompt[:60]!r} node={node.data} "
+                   f"allow_expand={node.allow_expand} label={node.label.plain[:40]}")
         self._populate_placeholder(node)
-        if not node.allow_expand:
-            # Convert leaf to branch by re-adding it — too complex.
-            # Instead, just add to the parent.
-            node = node.parent or tree.root
 
+        if not node.allow_expand:
+            # Node is a leaf in a chain — split the chain at this point.
+            parent = node.parent
+            if not parent:
+                return
+
+            # Snapshot siblings after the selected node (chain continuation)
+            siblings = list(parent.children)
+            idx = next((i for i, s in enumerate(siblings) if s is node), None)
+            if idx is None:
+                return
+            after_info = []
+            for s in siblings[idx + 1:]:
+                has_children = s.allow_expand
+                after_info.append((s.label, s.data, has_children))
+
+            _log.info(f"  splitting chain at idx={idx}, {len(after_info)} siblings after")
+
+            # Remove the selected node and everything after it
+            for s in siblings[idx:]:
+                s.remove()
+
+            # Re-add selected node as a branch (fork point)
+            fork_node = parent.add(node.label, data=node.data)
+            _log.info(f"  fork_node created, adding {len(after_info)} continuation + 1 pending")
+
+            # Re-add chain continuation as children of the fork
+            for lbl, dat, expandable in after_info:
+                if expandable:
+                    child = fork_node.add(lbl, data=dat)
+                    child.add_leaf(Text("...", style="dim"), data=-1)
+                else:
+                    fork_node.add_leaf(lbl, data=dat)
+        else:
+            fork_node = node
+
+        # Add the pending user message as a new fork branch
         label = Text()
-        label.append("H: ", style="bold cyan")
+        label.append("☻: ", style="bold cyan")
         label.append(prompt)
-        label.append("  ...", style="dim italic")
-        pending = node.add_leaf(label, data=-2)  # -2 = pending sentinel
-        node.expand()
+        label.append("  ⏳", style="dim italic")
+        pending = fork_node.add_leaf(label, data=-2)  # -2 = pending sentinel
+        fork_node.expand()
         tree.select_node(pending)
+        self.call_after_refresh(lambda: tree.scroll_to_node(pending))
 
     def _reload_tree_inline(self, select_session: str | None = None) -> None:
         """Rebuild trie in current thread and render on main thread.
@@ -1543,6 +1603,7 @@ class SessionTreeApp(App):
 
     def _fork_session(self, claude: str, session_id: str) -> str | None:
         """Fork a session via the CLI, returning the new session ID."""
+        _log.info(f"_fork_session {session_id[:8]}")
         env = {k: v for k, v in os.environ.items()
                if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
         cmd = [
@@ -1583,7 +1644,7 @@ class SessionTreeApp(App):
         status.update(f" {text}")
 
     def _finish_response(self, session_id: str | None, cost: float | None) -> None:
-        self.log.info(f"[{self._ts()}] _finish_response sid={session_id and session_id[:8]} cost={cost}")
+        _log.info(f"_finish_response sid={session_id and session_id[:8]} cost={cost}")
         parts = []
         if session_id:
             parts.append(f"session={session_id[:8]}")
@@ -1593,10 +1654,12 @@ class SessionTreeApp(App):
         self.load_tree(select_session=session_id)
 
     def action_expand_all(self) -> None:
+        _log.info("expand_all")
         tree = self.query_one("#tree", Tree)
         tree.root.expand_all()
 
     def action_collapse_all(self) -> None:
+        _log.info("collapse_all")
         tree = self.query_one("#tree", Tree)
         tree.root.collapse_all()
 
