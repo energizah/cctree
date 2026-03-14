@@ -44,11 +44,9 @@ Features:
       🛠︎ tool result)
     - Status bar: session metadata (date range, model, session ID)
       on highlighted node
+    - Search match highlighting in detail panel
 
 Ideas / TODO:
-    - d to diff two selected nodes at a fork point
-    - w to export conversation to markdown
-    - Highlight search matches in the detail panel
 """
 
 import hashlib
@@ -829,6 +827,12 @@ class SessionTreeApp(App):
             formatted = _format_detail(msg)
             lines_used += formatted.plain.count("\n") + 1
             result.append_text(formatted)
+
+        # Highlight search matches in the detail panel
+        if self._search_pattern:
+            regex = self._compile_pattern(self._search_pattern)
+            if regex:
+                result.highlight_regex(regex.pattern, style="bold reverse yellow")
 
         detail.update(result)
 
