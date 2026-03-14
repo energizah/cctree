@@ -7,6 +7,7 @@
  * Slash commands:
  *   /cc <prompt>          — send a message via Claude Code CLI
  *   /cc-import [session]  — import a JSONL session onto the canvas
+ *   /cc-import-all        — import all sessions from the current cwd onto the canvas
  *   /cc-sessions          — list available Claude Code sessions
  *   /cc-cwd [path]        — set/show the working directory for Claude Code
  */
@@ -63,6 +64,34 @@ class ClaudeCodeFeature extends FeaturePlugin {
         this.forkIndex = new ForkIndex();
         this._pendingForks = new Map(); // nodeId -> Promise
         this._toolStatus = new Map();   // nodeId -> current tool status element
+    }
+
+    getSlashCommands() {
+        return [
+            {
+                command: '/cc',
+                description: 'Send a message via Claude Code CLI',
+                placeholder: 'prompt...',
+            },
+            {
+                command: '/cc-import',
+                description: 'Import a Claude Code session onto the canvas',
+                placeholder: 'session-id (leave empty for picker)',
+            },
+            {
+                command: '/cc-import-all',
+                description: 'Import all sessions from the current working directory',
+            },
+            {
+                command: '/cc-sessions',
+                description: 'List available Claude Code sessions',
+            },
+            {
+                command: '/cc-cwd',
+                description: 'Set/show the Claude Code working directory',
+                placeholder: 'path (leave empty to show current)',
+            },
+        ];
     }
 
     async onLoad() {
@@ -633,6 +662,101 @@ class ClaudeCodeFeature extends FeaturePlugin {
         }
     }
 
+    // -- /cc-import-all -----------------------------------------------------
+
+    async handleImportAll(_command, _args, _context) {
+        const sessionsUrl = apiUrl(
+            `/api/claude-code/sessions${this.forkIndex.cwd ? `?cwd=${encodeURIComponent(this.forkIndex.cwd)}` : ''}`,
+        );
+
+        let sessions;
+        try {
+            const resp = await fetch(sessionsUrl);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            sessions = await resp.json();
+        } catch (err) {
+            this.showToast?.(`Failed to list sessions: ${err.message}`);
+            return;
+        }
+
+        if (sessions.length === 0) {
+            this.showToast?.('No Claude Code sessions found.');
+            return;
+        }
+
+        this.showToast?.(`Importing ${sessions.length} session(s)...`);
+
+        const SESSION_GAP = 200;
+        let xOffset = 0;
+        let totalNodes = 0;
+        let imported = 0;
+
+        for (const session of sessions) {
+            try {
+                const resp = await fetch(apiUrl('/api/claude-code/import'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: session.session_id,
+                        cwd: this.forkIndex.cwd,
+                    }),
+                });
+
+                if (!resp.ok) continue;
+
+                const { nodes, edges } = await resp.json();
+                if (nodes.length === 0) continue;
+
+                let maxRight = 0;
+
+                for (const nodeData of nodes) {
+                    nodeData.position.x += xOffset;
+
+                    const node = createNode(nodeData.type, nodeData.content, {
+                        position: nodeData.position,
+                        width: nodeData.width,
+                        height: nodeData.height,
+                        model: nodeData.model,
+                        title: nodeData.title,
+                    });
+                    node.id = nodeData.id;
+                    if (nodeData.created_at) {
+                        node.created_at = new Date(nodeData.created_at).getTime();
+                    }
+
+                    this.graph.addNode(node);
+
+                    if (nodeData.claude_uuid) {
+                        this.forkIndex.set(node.id, {
+                            sessionId: nodeData.session_id,
+                            claudeUuid: nodeData.claude_uuid,
+                            forkSessionId: null,
+                        });
+                    }
+
+                    const right = nodeData.position.x + (nodeData.width || 400);
+                    if (right > maxRight) maxRight = right;
+                }
+
+                for (const edgeData of edges) {
+                    const edge = createEdge(edgeData.source, edgeData.target, edgeData.type);
+                    edge.id = edgeData.id;
+                    this.graph.addEdge(edge);
+                }
+
+                totalNodes += nodes.length;
+                imported++;
+                xOffset = maxRight + SESSION_GAP;
+            } catch (err) {
+                console.warn(`[ClaudeCode] Failed to import session ${session.session_id}:`, err);
+            }
+        }
+
+        this._saveIndex();
+        this.saveSession();
+        this.showToast?.(`Imported ${totalNodes} nodes from ${imported} session(s).`);
+    }
+
     // -- /cc-sessions -------------------------------------------------------
 
     async handleSessions(_command, _args, _context) {
@@ -712,6 +836,7 @@ if (typeof window !== 'undefined') {
                     slashCommands: [
                         { command: '/cc', handler: 'handleCC' },
                         { command: '/cc-import', handler: 'handleImport' },
+                        { command: '/cc-import-all', handler: 'handleImportAll' },
                         { command: '/cc-sessions', handler: 'handleSessions' },
                         { command: '/cc-cwd', handler: 'handleCwd' },
                     ],

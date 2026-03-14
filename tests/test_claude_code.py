@@ -151,6 +151,10 @@ class TestSessionsDir:
         assert result.name == "-home-adam-src-myproject"
         assert result.parent == Path.home() / ".claude" / "projects"
 
+    def test_cwd_encodes_dots(self):
+        result = _sessions_dir("/home/adam/src/ArrayIdioms.jl")
+        assert result.name == "-home-adam-src-ArrayIdioms-jl"
+
 
 # =========================================================================
 # 2. JSONL import logic tests
@@ -204,6 +208,20 @@ class TestFindSessionFile:
             side_effect=lambda c=None: tmp_path / c.replace("/", "-") if c else tmp_path,
         ):
             result = _find_session_file("abc-123", cwd)
+            assert result == session_file
+
+    def test_finds_by_cwd_prefix(self, tmp_path):
+        """Setting cwd to /home/adam finds sessions under -home-adam-src-foo."""
+        project_dir = tmp_path / "-home-adam-src-foo"
+        project_dir.mkdir()
+        session_file = project_dir / "abc-123.jsonl"
+        session_file.write_text("{}")
+
+        with patch(
+            "plugins.claude_code._sessions_dir",
+            side_effect=lambda c=None: tmp_path / c.replace("/", "-") if c else tmp_path,
+        ):
+            result = _find_session_file("abc-123", "/home/adam")
             assert result == session_file
 
     def test_finds_across_projects(self, tmp_path):

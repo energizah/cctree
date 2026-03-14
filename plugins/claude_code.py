@@ -64,30 +64,32 @@ def _subprocess_env() -> dict[str, str]:
     return env
 
 
+def _encode_cwd(cwd: str) -> str:
+    """Encode a cwd path the same way Claude Code does for project directory names."""
+    return re.sub(r"[^a-zA-Z0-9\-]", "-", cwd)
+
+
 def _sessions_dir(cwd: Optional[str] = None) -> Path:
     """Return the JSONL sessions directory for a given cwd."""
     base = Path.home() / ".claude" / "projects"
     if cwd:
-        encoded = cwd.replace("/", "-")
-        return base / encoded
+        return base / _encode_cwd(cwd)
     # Default: list all project dirs
     return base
 
 
 def _find_session_file(session_id: str, cwd: Optional[str] = None) -> Optional[Path]:
     """Find a session JSONL file by session ID, searching under cwd or all projects."""
-    if cwd:
-        candidate = _sessions_dir(cwd) / f"{session_id}.jsonl"
-        if candidate.exists():
-            return candidate
-        return None
-    # Search all project dirs
     base = _sessions_dir()
     if not base.exists():
         return None
-    for project_dir in base.iterdir():
-        if not project_dir.is_dir():
-            continue
+    if cwd:
+        # Prefix match: /home/adam matches -home-adam, -home-adam-src-foo, etc.
+        encoded = _encode_cwd(cwd)
+        dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith(encoded)]
+    else:
+        dirs = [d for d in base.iterdir() if d.is_dir()]
+    for project_dir in dirs:
         candidate = project_dir / f"{session_id}.jsonl"
         if candidate.exists():
             return candidate
@@ -521,9 +523,11 @@ async def claude_code_sessions(cwd: Optional[str] = None):
 
     dirs_to_scan = []
     if cwd:
-        d = _sessions_dir(cwd)
-        if d.exists():
-            dirs_to_scan.append(d)
+        # Prefix match: /home/adam matches -home-adam, -home-adam-src-foo, etc.
+        encoded = _encode_cwd(cwd)
+        for d in base.iterdir():
+            if d.is_dir() and d.name.startswith(encoded):
+                dirs_to_scan.append(d)
     else:
         dirs_to_scan = [d for d in base.iterdir() if d.is_dir()]
 
