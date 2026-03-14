@@ -146,8 +146,59 @@ class ClaudeCodeFeature extends FeaturePlugin {
         `);
 
         this._addModeIndicator();
+        this._installSendIntercept();
 
         console.log('[ClaudeCode] Plugin loaded');
+    }
+
+    // -- Auto-route replies to Claude Code nodes ------------------------------
+
+    _isClaudeCodeNode(nodeId) {
+        // Check fork index (AI nodes with session metadata)
+        if (this.forkIndex.get(nodeId)) return true;
+        // Check if the node was created by this plugin (model field)
+        const node = this.graph.getNode(nodeId);
+        if (node?.model === 'claude-code') return true;
+        // Check if any parent is a CC node (handles human nodes in CC chains)
+        if (node) {
+            const parents = this.graph.getParents(nodeId);
+            for (const parent of parents) {
+                if (parent?.model === 'claude-code' || this.forkIndex.get(parent.id)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    _installSendIntercept() {
+        const app = window.app;
+        if (!app) return;
+
+        const origHandleSend = app.handleSend.bind(app);
+        const feature = this;
+
+        app.handleSend = async function () {
+            const content = app.chatInput.value.trim();
+            if (!content || content.startsWith('/')) {
+                // Slash commands and empty input — use original handler
+                return origHandleSend();
+            }
+
+            // Check if any selected node is a Claude Code node
+            const selectedIds = app.canvas.getSelectedNodeIds();
+            const isCC = selectedIds.some(id => feature._isClaudeCodeNode(id));
+
+            if (isCC) {
+                // Route through /cc — clear input and call handleCC directly
+                app.chatInput.value = '';
+                app.chatInput.style.height = 'auto';
+                await feature.handleCC('/cc', content, null);
+                return;
+            }
+
+            return origHandleSend();
+        };
     }
 
     // -- Mode indicator in the toolbar --------------------------------------
