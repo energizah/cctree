@@ -19,8 +19,10 @@ Keybindings:
     p           toggle detail panel
     y           copy detail to clipboard
     i           focus chat input
+    Ctrl-e      compose message in $EDITOR
     /           search (incremental on labels, Enter for full content)
     n/N         next/prev search match (expands collapsed nodes)
+    f/F         next/prev recent session tip (sorted by recency)
     o           open selected session in claude --resume
     r           reload sessions from disk
     Escape      cancel search or return to tree from input
@@ -34,19 +36,24 @@ Features:
     - Detail panel: shows sequential messages up to viewport height with
       syntax-highlighted code blocks (Pygments via Rich)
     - Chat input (i): send a prompt that forks the selected session,
-      rewinds to the selected message, and resumes via claude --print
+      rewinds to the selected message, and resumes via claude --print;
+      replies to session tips resume directly without forking
+    - Ctrl-e: open $VISUAL/$EDITOR to compose a message
     - Search (/): Helix-style incremental search on labels while typing;
       Enter or n/N triggers full content search backed by rg/grep for
       fast session-file narrowing, then regex match on message content
     - Search navigation: saves/restores collapse state so expanded
       subtrees are collapsed when moving to the next match
-    - Emoji role indicators (✨ assistant, 👤 human,
-      🛠️ tool result)
+    - Recent tips (f/F): navigate session endpoints sorted by recency
+    - Message age: every node shows its own timestamp; style indicates
+      session recency (bold green = tip of recent session, green = path
+      to recent tip, dim = old)
+    - Fork-point labels: [N branches] on nodes with multiple children
+    - Emoji role indicators (✨ assistant, 👤 human, 🛠️ tool result)
     - Status bar: session metadata (date range, model, session ID)
       on highlighted node
     - Search match highlighting in detail panel
-
-Ideas / TODO:
+    - Optional logging (--log): screenshots and logs to temp directory
 """
 
 import hashlib
