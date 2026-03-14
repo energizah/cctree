@@ -64,6 +64,7 @@ class ClaudeCodeFeature extends FeaturePlugin {
         this.forkIndex = new ForkIndex();
         this._pendingForks = new Map(); // nodeId -> Promise
         this._toolStatus = new Map();   // nodeId -> current tool status element
+        this._collapsedMessages = new Map(); // nodeId -> collapsed_messages array
     }
 
     getSlashCommands() {
@@ -172,12 +173,150 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 0%, 100% { opacity: 0.4; }
                 50% { opacity: 1; }
             }
+            .cc-expand-btn {
+                position: absolute;
+                top: 4px;
+                left: 4px;
+                padding: 2px 8px;
+                border-radius: 3px;
+                font-size: 10px;
+                font-family: monospace;
+                background: #89b4fa;
+                color: #1e1e2e;
+                border: none;
+                cursor: pointer;
+                z-index: 10;
+                transition: background 0.15s;
+                font-weight: bold;
+            }
+            .cc-expand-btn:hover {
+                background: #b4d0fb;
+            }
         `);
 
         this._addModeIndicator();
         this._installSendIntercept();
+        this._installExpandHandler();
 
         console.log('[ClaudeCode] Plugin loaded');
+    }
+
+    // -- Expand collapsed segments on double-click ----------------------------
+
+    _installExpandHandler() {
+        // Watch for new nodes being rendered and add expand buttons to collapsed ones
+        const observer = new MutationObserver(() => {
+            this._addExpandButtons();
+        });
+
+        const container = document.querySelector('.canvas-container') ||
+                          document.querySelector('svg');
+        if (container) {
+            observer.observe(container, { childList: true, subtree: true });
+        }
+    }
+
+    _addExpandButtons() {
+        console.log(`[ClaudeCode] _addExpandButtons: ${this._collapsedMessages.size} collapsed nodes, ${this.canvas.nodeElements?.size} rendered nodes`);
+        for (const [nodeId, msgs] of this._collapsedMessages) {
+            this._addExpandButton(nodeId, msgs);
+        }
+    }
+
+    _addExpandButton(nodeId, msgs) {
+        const wrapper = this.canvas.nodeElements?.get(nodeId);
+        if (!wrapper) {
+            console.log(`[ClaudeCode] No wrapper for ${nodeId}`);
+            return;
+        }
+        if (wrapper.querySelector('.cc-expand-btn')) return;
+
+        console.log(`[ClaudeCode] Adding expand button to ${nodeId}`, wrapper.tagName, wrapper.innerHTML?.slice(0, 100));
+        const nodeDiv = wrapper.querySelector('.node') || wrapper;
+        nodeDiv.style.position = 'relative';
+
+        const btn = document.createElement('button');
+        btn.className = 'cc-expand-btn';
+        btn.textContent = `Expand ${msgs.length} messages`;
+        btn.title = 'Expand collapsed segment into individual messages';
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._expandCollapsed(nodeId, msgs);
+        });
+
+        nodeDiv.appendChild(btn);
+    }
+
+    _expandCollapsed(collapsedNodeId, messages) {
+        const collapsedNode = this.graph.getNode(collapsedNodeId);
+        if (!collapsedNode) return;
+
+        // Find incoming and outgoing edges
+        const allEdges = this.graph.getAllEdges?.() || this.graph.edges || [];
+        const incomingEdges = allEdges.filter(e => e.target === collapsedNodeId);
+        const outgoingEdges = allEdges.filter(e => e.source === collapsedNodeId);
+
+        const baseX = collapsedNode.position?.x || 0;
+        const baseY = collapsedNode.position?.y || 0;
+        const NODE_GAP_Y = 40;
+
+        // Create individual nodes
+        const newNodeIds = [];
+        let yOffset = 0;
+
+        for (const msg of messages) {
+            const node = createNode(msg.type, msg.content, {
+                position: { x: baseX, y: baseY + yOffset },
+                width: collapsedNode.width || 400,
+                model: msg.model,
+            });
+            if (msg.timestamp) {
+                node.created_at = new Date(msg.timestamp).getTime();
+            }
+
+            this.graph.addNode(node);
+            newNodeIds.push(node.id);
+
+            if (msg.session_id) {
+                this.forkIndex.set(node.id, {
+                    sessionId: msg.session_id,
+                    forkSessionId: null,
+                });
+            }
+
+            // Estimate height
+            const lines = Math.max(3, Math.min(20, Math.floor(msg.content.length / 60) + 1));
+            const height = lines * 24 + 60;
+            yOffset += height + NODE_GAP_Y;
+        }
+
+        // Chain new nodes together
+        for (let i = 1; i < newNodeIds.length; i++) {
+            const edge = createEdge(newNodeIds[i - 1], newNodeIds[i], EdgeType.REPLY);
+            this.graph.addEdge(edge);
+        }
+
+        // Reconnect incoming edges to the first new node
+        for (const e of incomingEdges) {
+            this.graph.removeEdge(e.id);
+            const newEdge = createEdge(e.source, newNodeIds[0], e.type);
+            this.graph.addEdge(newEdge);
+        }
+
+        // Reconnect outgoing edges from the last new node
+        for (const e of outgoingEdges) {
+            this.graph.removeEdge(e.id);
+            const newEdge = createEdge(newNodeIds[newNodeIds.length - 1], e.target, e.type);
+            this.graph.addEdge(newEdge);
+        }
+
+        // Remove the collapsed node
+        this.graph.removeNode(collapsedNodeId);
+        this._collapsedMessages.delete(collapsedNodeId);
+
+        this._saveIndex();
+        this.saveSession();
+        this.showToast?.(`Expanded ${messages.length} messages`);
     }
 
     // -- Auto-route replies to Claude Code nodes ------------------------------
@@ -665,96 +804,81 @@ class ClaudeCodeFeature extends FeaturePlugin {
     // -- /cc-import-all -----------------------------------------------------
 
     async handleImportAll(_command, _args, _context) {
-        const sessionsUrl = apiUrl(
-            `/api/claude-code/sessions${this.forkIndex.cwd ? `?cwd=${encodeURIComponent(this.forkIndex.cwd)}` : ''}`,
-        );
+        if (!this.forkIndex.cwd) {
+            this.showToast?.('Set a working directory first: /cc-cwd <path>');
+            return;
+        }
 
-        let sessions;
+        this.showToast?.('Building unified DAG from all sessions...');
+
         try {
-            const resp = await fetch(sessionsUrl);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            sessions = await resp.json();
-        } catch (err) {
-            this.showToast?.(`Failed to list sessions: ${err.message}`);
-            return;
-        }
+            const resp = await fetch(apiUrl('/api/claude-code/import-dag'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    cwd: this.forkIndex.cwd,
+                }),
+            });
 
-        if (sessions.length === 0) {
-            this.showToast?.('No Claude Code sessions found.');
-            return;
-        }
-
-        this.showToast?.(`Importing ${sessions.length} session(s)...`);
-
-        const SESSION_GAP = 200;
-        let xOffset = 0;
-        let totalNodes = 0;
-        let imported = 0;
-
-        for (const session of sessions) {
-            try {
-                const resp = await fetch(apiUrl('/api/claude-code/import'), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        session_id: session.session_id,
-                        cwd: this.forkIndex.cwd,
-                    }),
-                });
-
-                if (!resp.ok) continue;
-
-                const { nodes, edges } = await resp.json();
-                if (nodes.length === 0) continue;
-
-                let maxRight = 0;
-
-                for (const nodeData of nodes) {
-                    nodeData.position.x += xOffset;
-
-                    const node = createNode(nodeData.type, nodeData.content, {
-                        position: nodeData.position,
-                        width: nodeData.width,
-                        height: nodeData.height,
-                        model: nodeData.model,
-                        title: nodeData.title,
-                    });
-                    node.id = nodeData.id;
-                    if (nodeData.created_at) {
-                        node.created_at = new Date(nodeData.created_at).getTime();
-                    }
-
-                    this.graph.addNode(node);
-
-                    if (nodeData.claude_uuid) {
-                        this.forkIndex.set(node.id, {
-                            sessionId: nodeData.session_id,
-                            claudeUuid: nodeData.claude_uuid,
-                            forkSessionId: null,
-                        });
-                    }
-
-                    const right = nodeData.position.x + (nodeData.width || 400);
-                    if (right > maxRight) maxRight = right;
-                }
-
-                for (const edgeData of edges) {
-                    const edge = createEdge(edgeData.source, edgeData.target, edgeData.type);
-                    edge.id = edgeData.id;
-                    this.graph.addEdge(edge);
-                }
-
-                totalNodes += nodes.length;
-                imported++;
-                xOffset = maxRight + SESSION_GAP;
-            } catch (err) {
-                console.warn(`[ClaudeCode] Failed to import session ${session.session_id}:`, err);
+            if (!resp.ok) {
+                const detail = await resp.json().catch(() => ({}));
+                throw new Error(detail.detail || `HTTP ${resp.status}`);
             }
-        }
 
-        this._saveIndex();
-        this.saveSession();
-        this.showToast?.(`Imported ${totalNodes} nodes from ${imported} session(s).`);
+            const { nodes, edges, session_count } = await resp.json();
+
+            if (nodes.length === 0) {
+                this.showToast?.('No conversation messages found.');
+                return;
+            }
+
+            for (const nodeData of nodes) {
+                const node = createNode(nodeData.type, nodeData.content, {
+                    position: nodeData.position,
+                    width: nodeData.width,
+                    height: nodeData.height,
+                    model: nodeData.model,
+                    title: nodeData.title,
+                });
+                node.id = nodeData.id;
+                if (nodeData.created_at) {
+                    node.created_at = new Date(nodeData.created_at).getTime();
+                }
+
+                this.graph.addNode(node);
+
+                if (nodeData.session_id) {
+                    this.forkIndex.set(node.id, {
+                        sessionId: nodeData.session_id,
+                        forkSessionId: null,
+                    });
+                }
+
+                // Store collapsed messages for expand-on-double-click
+                if (nodeData.collapsed_messages) {
+                    this._collapsedMessages.set(node.id, nodeData.collapsed_messages);
+                }
+            }
+
+            for (const edgeData of edges) {
+                const edge = createEdge(edgeData.source, edgeData.target, edgeData.type);
+                edge.id = edgeData.id;
+                this.graph.addEdge(edge);
+            }
+
+            this._saveIndex();
+            this.saveSession();
+
+            // Add expand buttons after canvas has rendered the new nodes
+            requestAnimationFrame(() => {
+                setTimeout(() => this._addExpandButtons(), 100);
+            });
+
+            this.showToast?.(`Imported ${nodes.length} nodes from ${session_count} session(s).`);
+        } catch (err) {
+            console.error('[ClaudeCode] Import-all error:', err);
+            this.showToast?.(`Import failed: ${err.message}`);
+        }
     }
 
     // -- /cc-sessions -------------------------------------------------------

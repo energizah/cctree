@@ -509,6 +509,310 @@ async def claude_code_import(req: ImportRequest):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/claude-code/import-dag — unified DAG from all sessions in a cwd
+# ---------------------------------------------------------------------------
+
+
+def _parse_session_file(path: Path) -> list[dict]:
+    """Parse a JSONL session file into coalesced message records.
+
+    Returns a list of dicts with keys: type, message, timestamp, content_hash.
+    Consecutive assistant records are merged. The content_hash is computed from
+    the raw message content for fork detection.
+    """
+    import hashlib
+
+    records: list[dict] = []
+    record_by_uuid: dict[str, dict] = {}
+
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rtype = rec.get("type")
+            if rtype not in ("user", "assistant"):
+                continue
+            records.append(rec)
+            uuid = rec.get("uuid")
+            if uuid:
+                record_by_uuid[uuid] = rec
+
+    # Coalesce consecutive assistant records
+    coalesced: list[dict] = []
+    merge_target: dict[str, str] = {}
+
+    for rec in records:
+        rtype = rec.get("type")
+        uuid = rec.get("uuid")
+        parent_uuid = rec.get("parentUuid")
+
+        if rtype == "assistant" and parent_uuid and parent_uuid in record_by_uuid:
+            parent_rec = record_by_uuid[parent_uuid]
+            if parent_rec.get("type") == "assistant":
+                root = parent_uuid
+                while root in merge_target:
+                    root = merge_target[root]
+                merge_target[uuid] = root
+
+                # Find or create root entry in coalesced list
+                root_entry = None
+                for entry in coalesced:
+                    if entry.get("_root_uuid") == root:
+                        root_entry = entry
+                        break
+                if root_entry is None:
+                    root_rec = record_by_uuid[root]
+                    root_entry = {**root_rec, "_root_uuid": root}
+                    # Replace existing entry
+                    for i, entry in enumerate(coalesced):
+                        if entry.get("uuid") == root:
+                            coalesced[i] = root_entry
+                            break
+
+                root_msg = root_entry["message"]
+                root_content = root_msg.get("content", [])
+                new_content = rec.get("message", {}).get("content", [])
+                if isinstance(root_content, str):
+                    root_content = [{"type": "text", "text": root_content}]
+                if isinstance(new_content, str):
+                    new_content = [{"type": "text", "text": new_content}]
+                root_msg["content"] = root_content + new_content
+                continue
+
+        if rtype == "user" or (rtype == "assistant" and uuid not in merge_target.values()):
+            if uuid not in merge_target:
+                coalesced.append(rec)
+
+    # Compute content hashes for fork detection
+    result = []
+    for rec in coalesced:
+        msg = rec.get("message", {})
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        raw = json.dumps(content, sort_keys=True)
+        h = hashlib.sha256(f"{role}:{raw}".encode()).hexdigest()[:16]
+        result.append({
+            "type": rec.get("type"),
+            "message": msg,
+            "timestamp": rec.get("timestamp", ""),
+            "content_hash": h,
+            "session_id": rec.get("sessionId", ""),
+        })
+
+    return result
+
+
+class ImportDagRequest(BaseModel):
+    cwd: str
+    max_tool_output: int = Field(default=2000, ge=0)
+
+
+@app.post("/api/claude-code/import-dag")
+async def claude_code_import_dag(req: ImportDagRequest):
+    """Build a unified DAG from all sessions under a cwd by detecting forks.
+
+    Sessions that share the same message prefix are merged: the shared part
+    becomes a single trunk, and divergence points become branches.
+    """
+    base = _sessions_dir()
+    if not base.exists():
+        return {"nodes": [], "edges": []}
+
+    encoded = _encode_cwd(req.cwd)
+    dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith(encoded)]
+
+    # Parse all sessions
+    all_sessions: list[list[dict]] = []
+    for d in dirs:
+        for jsonl_file in d.glob("*.jsonl"):
+            msgs = _parse_session_file(jsonl_file)
+            if msgs:
+                all_sessions.append(msgs)
+
+    if not all_sessions:
+        return {"nodes": [], "edges": []}
+
+    # Sort sessions longest first — the longest is most likely the "trunk"
+    all_sessions.sort(key=len, reverse=True)
+
+    # Build a trie keyed by content_hash sequences.
+    # Each trie node: { children: {hash: node}, messages: [msg_variants], count: int }
+    trie_root: dict = {"children": {}, "messages": [], "count": 0, "session_ids": set()}
+
+    for session_msgs in all_sessions:
+        node = trie_root
+        for msg in session_msgs:
+            h = msg["content_hash"]
+            if h not in node["children"]:
+                node["children"][h] = {
+                    "children": {},
+                    "messages": [msg],
+                    "count": 0,
+                    "session_ids": set(),
+                }
+            node = node["children"][h]
+            node["count"] += 1
+            node["session_ids"].add(msg["session_id"])
+
+    # Collapse linear chains in the trie.
+    # Walk the trie and replace single-child runs with a summary.
+    # A "segment" is a list of consecutive trie nodes each with exactly 1 child.
+    # At branch points (>1 child) or leaves (0 children) the segment ends.
+
+    def _collect_segment(start_node: dict) -> tuple[list[dict], dict]:
+        """Follow single-child chain from start_node, returning (chain, end_node).
+
+        chain contains the trie nodes in the run (including start_node).
+        end_node is the last node in the chain (which has 0 or >1 children).
+        """
+        chain = [start_node]
+        current = start_node
+        while len(current["children"]) == 1:
+            child = next(iter(current["children"].values()))
+            chain.append(child)
+            current = child
+        return chain, current
+
+    def _segment_content(chain: list[dict], max_tool_output: int) -> str:
+        """Build display content for a collapsed segment."""
+        if len(chain) == 1:
+            msg = chain[0]["messages"][0]
+            content = _extract_text_content(msg["message"])
+            if msg["type"] == "assistant" and max_tool_output > 0:
+                content = _truncate(content, max_tool_output * 10)
+            return content
+
+        first_msg = chain[0]["messages"][0]
+        last_msg = chain[-1]["messages"][0]
+        first_text = _extract_text_content(first_msg["message"])
+        last_text = _extract_text_content(last_msg["message"])
+
+        # Count user and assistant messages in the chain
+        n_user = sum(1 for n in chain if n["messages"][0]["type"] == "user")
+        n_asst = sum(1 for n in chain if n["messages"][0]["type"] == "assistant")
+
+        first_preview = _truncate(first_text, 200)
+        last_preview = _truncate(last_text, 200)
+
+        parts = [
+            f"**{len(chain)} messages** ({n_user} human, {n_asst} AI)",
+            "",
+            f"**First:** {first_preview}",
+            "",
+            "---",
+            "",
+            f"**Last:** {last_preview}",
+        ]
+        return "\n".join(parts)
+
+    # Convert collapsed trie to canvas nodes/edges via iterative DFS
+    NODE_WIDTH = 400
+    NODE_GAP_X = 100
+    NODE_GAP_Y = 40
+    y_cursor = 0
+
+    nodes = []
+    edges = []
+
+    # Stack: (trie_node, parent_canvas_id, depth, n_siblings)
+    stack: list[tuple[dict, str | None, int, int]] = []
+
+    # Seed stack with root's children (reversed for DFS order)
+    n_root_children = len(trie_root["children"])
+    for child in reversed(list(trie_root["children"].values())):
+        stack.append((child, None, 0, n_root_children))
+
+    while stack:
+        trie_node, parent_canvas_id, depth, n_siblings = stack.pop()
+
+        # Collect the linear segment starting at this node
+        chain, end_node = _collect_segment(trie_node)
+
+        # Build the canvas node for this segment
+        content = _segment_content(chain, req.max_tool_output)
+        first_msg = chain[0]["messages"][0]
+
+        node_id = str(uuid4())
+        # Use the type of the first message in the segment
+        node_type = "human" if first_msg["type"] == "user" else "ai"
+        model = first_msg["message"].get("model")
+        timestamp = first_msg["timestamp"]
+
+        # Collect session IDs across the segment
+        all_session_ids: set[str] = set()
+        for seg_node in chain:
+            all_session_ids.update(seg_node["session_ids"])
+        session_ids = list(all_session_ids)
+        session_count = chain[0]["count"]
+
+        x = depth * (NODE_WIDTH + NODE_GAP_X)
+        y = y_cursor
+
+        lines = max(3, min(20, len(content) // 60 + 1))
+        height = lines * 24 + 60
+
+        node_data = {
+            "id": node_id,
+            "type": "note" if len(chain) > 1 else node_type,
+            "content": content,
+            "position": {"x": x, "y": y},
+            "width": NODE_WIDTH,
+            "height": height,
+            "created_at": timestamp,
+            "model": model,
+            "session_id": session_ids[0] if session_ids else None,
+            "session_count": session_count,
+            "collapsed_count": len(chain),
+        }
+
+        # Include individual messages for collapsed segments so frontend can expand
+        if len(chain) > 1:
+            collapsed_msgs = []
+            for seg_node in chain:
+                seg_msg = seg_node["messages"][0]
+                seg_content = _extract_text_content(seg_msg["message"])
+                if seg_msg["type"] == "assistant" and req.max_tool_output > 0:
+                    seg_content = _truncate(seg_content, req.max_tool_output * 10)
+                collapsed_msgs.append({
+                    "type": "human" if seg_msg["type"] == "user" else "ai",
+                    "content": seg_content,
+                    "timestamp": seg_msg["timestamp"],
+                    "model": seg_msg["message"].get("model"),
+                    "session_id": seg_msg["session_id"],
+                })
+            node_data["collapsed_messages"] = collapsed_msgs
+
+        nodes.append(node_data)
+
+        y_cursor += height + NODE_GAP_Y
+
+        if parent_canvas_id:
+            edge_type = "branch" if n_siblings > 1 else "reply"
+            edges.append({
+                "id": str(uuid4()),
+                "source": parent_canvas_id,
+                "target": node_id,
+                "type": edge_type,
+            })
+
+        # Push the end_node's children onto the stack (these are branch points)
+        n_end_children = len(end_node["children"])
+        for child in reversed(list(end_node["children"].values())):
+            stack.append((child, node_id, depth + 1, n_end_children))
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "session_count": len(all_sessions),
+    }
+
+
+# ---------------------------------------------------------------------------
 # GET /api/claude-code/sessions — list available sessions
 # ---------------------------------------------------------------------------
 

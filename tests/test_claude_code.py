@@ -26,8 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "lib" / "
 from plugins.claude_code import (
     _extract_text_content,
     _find_session_file,
+    _parse_session_file,
     _sessions_dir,
     _truncate,
+    claude_code_import_dag,
+    ImportDagRequest,
 )
 
 
@@ -475,3 +478,98 @@ class TestSessionsListing:
             )
 
         assert len(result) == 0
+
+
+# =========================================================================
+# 4. DAG import tests (cross-session fork detection + chain collapsing)
+# =========================================================================
+
+
+class TestImportDag:
+    @pytest.fixture
+    def dag_dir(self, tmp_path):
+        """Create a project dir for DAG tests."""
+        project_dir = tmp_path / "-tmp-dagtest"
+        project_dir.mkdir()
+        return project_dir
+
+    def _run_dag(self, tmp_path):
+        import asyncio
+
+        with patch("plugins.claude_code._sessions_dir", return_value=tmp_path):
+            req = ImportDagRequest(cwd="/tmp/dagtest")
+            return asyncio.get_event_loop().run_until_complete(
+                claude_code_import_dag(req)
+            )
+
+    def test_two_forked_sessions_share_prefix(self, tmp_path, dag_dir):
+        """Two sessions with identical first 2 messages diverge at msg 3."""
+        u1, a1 = str(uuid4()), str(uuid4())
+
+        # Session A: u1 → a1 → u2a → a2a
+        u2a, a2a = str(uuid4()), str(uuid4())
+        _write_jsonl(dag_dir / "sess-a.jsonl", [
+            _make_record("user", u1, content="hello", sessionId="sess-a"),
+            _make_record("assistant", a1, parent_uuid=u1, content="hi", sessionId="sess-a"),
+            _make_record("user", u2a, parent_uuid=a1, content="branch A", sessionId="sess-a"),
+            _make_record("assistant", a2a, parent_uuid=u2a, content="reply A", sessionId="sess-a"),
+        ])
+
+        # Session B: same first 2 messages, diverges at msg 3
+        u2b, a2b = str(uuid4()), str(uuid4())
+        _write_jsonl(dag_dir / "sess-b.jsonl", [
+            _make_record("user", u1, content="hello", sessionId="sess-b"),
+            _make_record("assistant", a1, parent_uuid=u1, content="hi", sessionId="sess-b"),
+            _make_record("user", u2b, parent_uuid=a1, content="branch B", sessionId="sess-b"),
+            _make_record("assistant", a2b, parent_uuid=u2b, content="reply B", sessionId="sess-b"),
+        ])
+
+        result = self._run_dag(tmp_path)
+
+        # Shared prefix (hello + hi) collapses into 1 note node.
+        # Then 2 branches, each with 2 messages collapsed.
+        # Total: 3 nodes (1 shared + 2 branches)
+        assert result["session_count"] == 2
+        assert len(result["nodes"]) == 3
+
+        # The shared node should have collapsed_count == 2
+        shared = [n for n in result["nodes"] if n["session_count"] == 2]
+        assert len(shared) == 1
+        assert shared[0]["collapsed_count"] == 2
+
+        # Branch edges
+        branch_edges = [e for e in result["edges"] if e["type"] == "branch"]
+        assert len(branch_edges) == 2
+
+    def test_no_shared_prefix(self, tmp_path, dag_dir):
+        """Two sessions with different first messages produce independent trees."""
+        _write_jsonl(dag_dir / "sess-a.jsonl", [
+            _make_record("user", str(uuid4()), content="apple", sessionId="sess-a"),
+        ])
+        _write_jsonl(dag_dir / "sess-b.jsonl", [
+            _make_record("user", str(uuid4()), content="banana", sessionId="sess-b"),
+        ])
+
+        result = self._run_dag(tmp_path)
+        assert result["session_count"] == 2
+        assert len(result["nodes"]) == 2
+        assert len(result["edges"]) == 0
+
+    def test_long_linear_collapses(self, tmp_path, dag_dir):
+        """A single session with 10 messages collapses to 1 node."""
+        records = []
+        prev = None
+        for i in range(10):
+            uid = str(uuid4())
+            rtype = "user" if i % 2 == 0 else "assistant"
+            records.append(
+                _make_record(rtype, uid, parent_uuid=prev, content=f"msg {i}", sessionId="sess-a")
+            )
+            prev = uid
+
+        _write_jsonl(dag_dir / "sess-a.jsonl", records)
+
+        result = self._run_dag(tmp_path)
+        assert result["session_count"] == 1
+        assert len(result["nodes"]) == 1
+        assert result["nodes"][0]["collapsed_count"] == 10
