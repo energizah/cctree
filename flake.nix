@@ -13,7 +13,7 @@
         python = pkgs.python311;
         pythonEnv = pkgs.python3.withPackages (ps: [ ps.textual ]);
       in {
-        packages.default = pkgs.writeShellScriptBin "cc-tree" ''
+        packages.default = pkgs.writeShellScriptBin "cctree" ''
           exec ${pythonEnv}/bin/python ${./tui.py} "$@"
         '';
 
@@ -33,11 +33,11 @@
 
             source .venv/bin/activate
 
-            alias cc-tree="python ''${CANVAS_CLAUDE_DIR:-$HOME/src/canvas-claude}/tui.py"
+            alias cctree="python ''${CANVAS_CLAUDE_DIR:-$HOME/src/canvas-claude}/tui.py"
 
             echo ""
             echo "cctree dev shell"
-            echo "  tree viewer:   cc-tree /path/to/project"
+            echo "  tree viewer:   cctree /path/to/project"
             echo ""
           '';
         };

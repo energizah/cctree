@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 SCREENSHOTS = Path("snap")
-LOG = Path("cc-tree.log")
+LOG = Path("cctree.log")
 
 
 def extract_lines(svg_path: Path) -> tuple[str, list[str], int | None]:
