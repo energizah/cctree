@@ -65,6 +65,9 @@ _log_handler = logging.FileHandler(Path(__file__).parent / "cc-tree.log")
 _log_handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", datefmt="%H:%M:%S"))
 _log.addHandler(_log_handler)
 
+_SCREENSHOT_DIR = Path(__file__).parent / "cc-tree-screenshots"
+_screenshot_seq = 0
+
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -587,7 +590,7 @@ class SessionTreeApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        _log.info(f"mounted cwd={self.cwd}")
+        self._snap(f"mounted cwd={self.cwd}")
         tree = self.query_one("#tree", Tree)
         tree.root.set_label(Text(f" {self.cwd}", style="bold"))
         tree.root.expand()
@@ -605,7 +608,7 @@ class SessionTreeApp(App):
         self.call_from_thread(self._render_tree, select_session)
 
     def _render_tree(self, select_session: str | None = None) -> None:
-        _log.info(f"_render_tree start select={select_session and select_session[:8]}")
+        self._snap(f"_render_tree start select={select_session and select_session[:8]}")
         tree = self.query_one("#tree", Tree)
         tree.root.remove_children()
         self._add_trie_children(tree.root, self.trie_root)
@@ -614,7 +617,7 @@ class SessionTreeApp(App):
         status = self.query_one("#status", Static)
         node_count = self._count_nodes(self.trie_root)
         status.update(f" {self.session_count} sessions, {node_count} messages")
-        _log.info(f"_render_tree done")
+        self._snap(f"_render_tree done")
 
         if select_session:
             self._select_session(select_session)
@@ -642,9 +645,23 @@ class SessionTreeApp(App):
             return self._node_data.get(nid)
         return None
 
+    def _snap(self, msg: str) -> None:
+        """Log a message and save an SVG screenshot."""
+        global _screenshot_seq
+        _log.info(msg)
+        try:
+            svg = self.export_screenshot(title=msg)
+            _SCREENSHOT_DIR.mkdir(exist_ok=True)
+            fname = _SCREENSHOT_DIR / f"{_screenshot_seq:04d}.svg"
+            _screenshot_seq += 1
+            fname.write_text(svg)
+            _log.info(f"  screenshot -> {fname.name}")
+        except Exception as e:
+            _log.info(f"  screenshot failed: {e}")
+
     def _select_session(self, session_id: str) -> None:
         """Expand the tree along the path of a session and select the deepest node."""
-        _log.info(f"_select_session {session_id[:8]}")
+        self._snap(f"_select_session {session_id[:8]}")
         tree = self.query_one("#tree", Tree)
 
         def _walk(node):
@@ -680,7 +697,7 @@ class SessionTreeApp(App):
         if len(children) != 1 or children[0].data != -1:
             return  # already populated
 
-        _log.info(f"populate node={node.data} label={node.label.plain[:40]}")
+        self._snap(f"populate node={node.data} label={node.label.plain[:40]}")
         children[0].remove()
 
         chain = data.get("chain")
@@ -785,12 +802,12 @@ class SessionTreeApp(App):
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
         """Lazily populate children on first expand."""
-        _log.info(f"expanded node={event.node.data} label={event.node.label.plain[:40]}")
+        self._snap(f"expanded node={event.node.data} label={event.node.label.plain[:40]}")
         self._populate_placeholder(event.node)
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         """Show message detail when cursor moves to a node."""
-        _log.info(f"highlighted: node.data={event.node.data}")
+        self._snap(f"highlighted: node.data={event.node.data}")
         data = self._get(event.node.data)
         self._pending_detail = data
         if self._detail_timer:
@@ -799,7 +816,7 @@ class SessionTreeApp(App):
         self._update_status_bar(data)
 
     def _flush_detail(self) -> None:
-        _log.info("flush_detail fired")
+        self._snap("flush_detail fired")
         detail = self.query_one("#detail", Static)
         data = self._pending_detail
         if not data:
@@ -891,12 +908,12 @@ class SessionTreeApp(App):
         status.update(" │ ".join(parts))
 
     def action_cursor_down(self) -> None:
-        _log.info("cursor_down")
+        self._snap("cursor_down")
         tree = self.query_one("#tree", Tree)
         tree.action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        _log.info("cursor_up")
+        self._snap("cursor_up")
         tree = self.query_one("#tree", Tree)
         tree.action_cursor_up()
 
@@ -951,10 +968,10 @@ class SessionTreeApp(App):
     def action_toggle_detail(self) -> None:
         detail = self.query_one("#detail", Static)
         detail.display = not detail.display
-        _log.info(f"detail panel {'shown' if detail.display else 'hidden'}")
+        self._snap(f"detail panel {'shown' if detail.display else 'hidden'}")
 
     def action_yank_detail(self) -> None:
-        _log.info("yank_detail")
+        self._snap("yank_detail")
         tree = self.query_one("#tree", Tree)
         node = tree.cursor_node
         data = self._get(node.data) if node else None
@@ -982,7 +999,7 @@ class SessionTreeApp(App):
         tree = self.query_one("#tree", Tree)
         node = tree.cursor_node
         data = self._get(node.data) if node else None
-        _log.info(f"open_session node={node and node.data} sids={data and data.get('session_ids', [])}")
+        self._snap(f"open_session node={node and node.data} sids={data and data.get('session_ids', [])}")
         if not data:
             return
         sids = data.get("session_ids", [])
@@ -1006,7 +1023,7 @@ class SessionTreeApp(App):
 
     def action_reload(self) -> None:
         """Reload sessions from disk."""
-        _log.info("reload")
+        self._snap("reload")
         self._loading = True
         status = self.query_one("#status", Static)
         status.update(" Reloading sessions...")
@@ -1024,7 +1041,7 @@ class SessionTreeApp(App):
     # ------------------------------------------------------------------
 
     def action_search(self) -> None:
-        _log.info("search opened")
+        self._snap("search opened")
         search = self.query_one("#search-input", Input)
         search.display = True
         search.value = ""
@@ -1092,7 +1109,7 @@ class SessionTreeApp(App):
 
     def _rg_matching_sessions(self, pattern: str) -> set[str] | None:
         """Use rg to find session files containing pattern.  Returns session IDs or None on error."""
-        _log.info(f"_rg_matching_sessions pattern={pattern!r}")
+        self._snap(f"_rg_matching_sessions pattern={pattern!r}")
         rg = shutil.which("rg") or shutil.which("grep")
         if not rg:
             return None
@@ -1129,7 +1146,7 @@ class SessionTreeApp(App):
         Returns (session_ids, content_hashes) or None on error.
         Parses only the matching lines instead of entire files.
         """
-        _log.info(f"_rg_matching_hashes pattern={pattern!r}")
+        self._snap(f"_rg_matching_hashes pattern={pattern!r}")
         rg = shutil.which("rg")
         if not rg:
             return None
@@ -1224,7 +1241,7 @@ class SessionTreeApp(App):
 
     def _run_search(self, pattern: str, forward: bool = True) -> None:
         """Find all nodes matching pattern and jump to the first one."""
-        _log.info(f"_run_search pattern={pattern!r}")
+        self._snap(f"_run_search pattern={pattern!r}")
         if not pattern:
             self._search_matches = []
             self._search_index = -1
@@ -1339,7 +1356,7 @@ class SessionTreeApp(App):
 
     def _refresh_matches(self, expand_all: bool = False) -> None:
         """Re-collect matches, preserving current position."""
-        _log.info(f"_refresh_matches pattern={self._search_pattern!r} expand_all={expand_all}")
+        self._snap(f"_refresh_matches pattern={self._search_pattern!r} expand_all={expand_all}")
         regex = self._compile_pattern(self._search_pattern)
         if not regex:
             self._search_matches = []
@@ -1348,12 +1365,12 @@ class SessionTreeApp(App):
         rg_result = self._rg_matching_hashes(self._search_pattern)
         if rg_result is not None:
             rg_sessions, rg_hashes = rg_result
-            _log.info(f"  rg: {len(rg_sessions)} sessions, {len(rg_hashes)} hashes")
+            self._snap(f"  rg: {len(rg_sessions)} sessions, {len(rg_hashes)} hashes")
         else:
             rg_sessions, rg_hashes = None, None
-            _log.info("  rg: unavailable")
+            self._snap("  rg: unavailable")
         nodes = self._collect_nodes(expand_all=expand_all, rg_sessions=rg_sessions)
-        _log.info(f"  collected {len(nodes)} nodes")
+        self._snap(f"  collected {len(nodes)} nodes")
         old_node = (self._search_matches[self._search_index]
                     if self._search_matches and 0 <= self._search_index < len(self._search_matches)
                     else None)
@@ -1399,7 +1416,7 @@ class SessionTreeApp(App):
         if not prompt or self._streaming:
             return
         event.input.value = ""
-        _log.info(f"chat submit: {prompt[:60]!r}")
+        self._snap(f"chat submit: {prompt[:60]!r}")
 
         # Get session_id and content_hash from selected tree node (if any)
         tree = self.query_one("#tree", Tree)
@@ -1539,10 +1556,10 @@ class SessionTreeApp(App):
         tree = self.query_one("#tree", Tree)
         node = tree.cursor_node
         if not node or node is tree.root:
-            _log.info("_add_pending_node: no cursor node")
+            self._snap("_add_pending_node: no cursor node")
             return
 
-        _log.info(f"_add_pending_node: prompt={prompt[:60]!r} node={node.data} "
+        self._snap(f"_add_pending_node: prompt={prompt[:60]!r} node={node.data} "
                    f"allow_expand={node.allow_expand} label={node.label.plain[:40]}")
         self._populate_placeholder(node)
 
@@ -1562,7 +1579,7 @@ class SessionTreeApp(App):
                 has_children = s.allow_expand
                 after_info.append((s.label, s.data, has_children))
 
-            _log.info(f"  splitting chain at idx={idx}, {len(after_info)} siblings after")
+            self._snap(f"  splitting chain at idx={idx}, {len(after_info)} siblings after")
 
             # Remove the selected node and everything after it
             for s in siblings[idx:]:
@@ -1570,7 +1587,7 @@ class SessionTreeApp(App):
 
             # Re-add selected node as a branch (fork point)
             fork_node = parent.add(node.label, data=node.data)
-            _log.info(f"  fork_node created, adding {len(after_info)} continuation + 1 pending")
+            self._snap(f"  fork_node created, adding {len(after_info)} continuation + 1 pending")
 
             # Re-add chain continuation as children of the fork
             for lbl, dat, expandable in after_info:
@@ -1644,7 +1661,7 @@ class SessionTreeApp(App):
         status.update(f" {text}")
 
     def _finish_response(self, session_id: str | None, cost: float | None) -> None:
-        _log.info(f"_finish_response sid={session_id and session_id[:8]} cost={cost}")
+        self._snap(f"_finish_response sid={session_id and session_id[:8]} cost={cost}")
         parts = []
         if session_id:
             parts.append(f"session={session_id[:8]}")
@@ -1654,12 +1671,12 @@ class SessionTreeApp(App):
         self.load_tree(select_session=session_id)
 
     def action_expand_all(self) -> None:
-        _log.info("expand_all")
+        self._snap("expand_all")
         tree = self.query_one("#tree", Tree)
         tree.root.expand_all()
 
     def action_collapse_all(self) -> None:
-        _log.info("collapse_all")
+        self._snap("collapse_all")
         tree = self.query_one("#tree", Tree)
         tree.root.collapse_all()
 
