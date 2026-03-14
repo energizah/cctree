@@ -532,6 +532,7 @@ class SessionTreeApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("ctrl+c", "quit", "Quit", show=False),
         Binding("e", "expand_all", "Expand all"),
         Binding("c", "collapse_all", "Collapse all"),
         Binding("j", "cursor_down", "Down", show=False),
