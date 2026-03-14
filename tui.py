@@ -12,15 +12,19 @@ Usage:
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Footer, Header, Static, Tree
+from textual.widgets import Footer, Header, Input, Static, Tree
 from textual import work
 
 
@@ -35,6 +39,113 @@ def _encode_cwd(cwd: str) -> str:
 
 def _sessions_dir() -> Path:
     return Path.home() / ".claude" / "projects"
+
+
+def _find_session_file(session_id: str, cwd: str) -> Path | None:
+    """Locate the JSONL file for a given session ID under cwd."""
+    base = _sessions_dir()
+    encoded = _encode_cwd(cwd)
+    for d in base.iterdir():
+        if not d.is_dir() or not d.name.startswith(encoded):
+            continue
+        p = d / f"{session_id}.jsonl"
+        if p.exists():
+            return p
+    return None
+
+
+def _rewind_session_file(path: Path, target_hash: str) -> bool:
+    """Truncate a session JSONL in-place up to the message matching target_hash.
+
+    Replays coalescing to compute content hashes, finds the raw line matching
+    the target, and rewrites the file with only records up to that point.
+    Returns True on success.
+    """
+    with open(path) as f:
+        raw_lines = f.readlines()
+
+    # Parse user/assistant records, tracking line indices
+    records = []  # (rec, line_idx)
+    record_by_uuid = {}
+
+    for i, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            rec = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("type") not in ("user", "assistant"):
+            continue
+        records.append((rec, i))
+        uid = rec.get("uuid")
+        if uid:
+            record_by_uuid[uid] = rec
+
+    # Replay coalescing to compute content hashes per coalesced message
+    coalesced = []  # list of {message, _root_uuid, _last_line}
+    merge_target = {}
+
+    for rec, line_idx in records:
+        rtype = rec.get("type")
+        uid = rec.get("uuid")
+        parent_uuid = rec.get("parentUuid")
+
+        if rtype == "assistant" and parent_uuid and parent_uuid in record_by_uuid:
+            parent_rec = record_by_uuid[parent_uuid]
+            if parent_rec.get("type") == "assistant":
+                root = parent_uuid
+                while root in merge_target:
+                    root = merge_target[root]
+                merge_target[uid] = root
+
+                for entry in coalesced:
+                    if entry["_root_uuid"] == root:
+                        entry["_last_line"] = line_idx
+                        root_msg = entry["message"]
+                        root_content = root_msg.get("content", [])
+                        new_content = rec.get("message", {}).get("content", [])
+                        if isinstance(root_content, str):
+                            root_content = [{"type": "text", "text": root_content}]
+                        if isinstance(new_content, str):
+                            new_content = [{"type": "text", "text": new_content}]
+                        root_msg["content"] = root_content + new_content
+                        break
+                continue
+
+        if rtype == "user" or (rtype == "assistant" and uid not in merge_target.values()):
+            if uid not in merge_target:
+                coalesced.append({
+                    "type": rtype,
+                    "message": {**rec.get("message", {})},
+                    "_root_uuid": uid or "",
+                    "_last_line": line_idx,
+                })
+
+    # Find cutoff line for target_hash
+    cutoff_line = None
+    for entry in coalesced:
+        msg = entry["message"]
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        raw = json.dumps(content, sort_keys=True)
+        h = hashlib.sha256(f"{role}:{raw}".encode()).hexdigest()[:16]
+        cutoff_line = entry["_last_line"]
+        if h == target_hash:
+            break
+    else:
+        return False
+
+    # Rewrite file truncated at cutoff
+    with open(path, "w") as f:
+        for i, line in enumerate(raw_lines):
+            if i > cutoff_line:
+                break
+            f.write(line)
+
+    return True
+
 
 
 def _truncate(text: str, max_len: int) -> str:
@@ -171,6 +282,9 @@ def _build_trie(cwd: str) -> tuple[dict, int]:
         for jsonl_file in d.glob("*.jsonl"):
             msgs = _parse_session_file(jsonl_file)
             if msgs:
+                file_sid = jsonl_file.stem
+                for msg in msgs:
+                    msg["file_session_id"] = file_sid
                 all_sessions.append(msgs)
 
     if not all_sessions:
@@ -193,7 +307,7 @@ def _build_trie(cwd: str) -> tuple[dict, int]:
                 }
             node = node["children"][h]
             node["count"] += 1
-            node["session_ids"].add(msg["session_id"])
+            node["session_ids"].add(msg.get("file_session_id", msg["session_id"]))
 
     return trie_root, len(all_sessions)
 
@@ -355,7 +469,6 @@ class SessionTreeApp(App):
         overflow-y: auto;
     }
     #status {
-        dock: bottom;
         height: 1;
         background: $surface;
         color: $text-muted;
@@ -364,6 +477,9 @@ class SessionTreeApp(App):
     #main {
         layout: horizontal;
         height: 1fr;
+    }
+    #chat-input {
+        margin: 0 1;
     }
     """
 
@@ -381,6 +497,7 @@ class SessionTreeApp(App):
         Binding("G", "go_bottom", "Bottom", show=False),
         Binding("p", "toggle_detail", "Toggle detail"),
         Binding("y", "yank_detail", "Copy detail"),
+        Binding("i", "focus_input", "Chat"),
     ]
 
     def __init__(self, cwd: str):
@@ -392,12 +509,17 @@ class SessionTreeApp(App):
         self._detail_timer = None
         self._node_data: dict[int, dict] = {}  # id -> heavy data
         self._next_id = 0
+        self._streaming = False
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main"):
             yield Tree("Sessions", id="tree")
             yield Static("Select a node to view details", id="detail")
+        yield Input(
+            placeholder="Send a message (Enter to send, selected node = resume context)",
+            id="chat-input",
+        )
         yield Static("", id="status")
         yield Footer()
 
@@ -411,20 +533,22 @@ class SessionTreeApp(App):
         self.load_tree()
 
     @work(thread=True)
-    def load_tree(self) -> None:
+    def load_tree(self, select_session: str | None = None) -> None:
         """Parse sessions in a worker thread so the UI stays responsive."""
         self.trie_root, self.session_count = _build_trie(self.cwd)
-        self.call_from_thread(self._render_tree)
+        self.call_from_thread(self._render_tree, select_session)
 
-    def _render_tree(self) -> None:
+    def _render_tree(self, select_session: str | None = None) -> None:
         tree = self.query_one("#tree", Tree)
         tree.root.remove_children()
-
         self._add_trie_children(tree.root, self.trie_root)
 
         status = self.query_one("#status", Static)
         node_count = self._count_nodes(self.trie_root)
         status.update(f" {self.session_count} sessions, {node_count} messages")
+
+        if select_session:
+            self._select_session(select_session)
 
     def _count_nodes(self, trie_node: dict) -> int:
         count = 0
@@ -449,6 +573,86 @@ class SessionTreeApp(App):
             return self._node_data.get(nid)
         return None
 
+    def _select_session(self, session_id: str) -> None:
+        """Expand the tree along the path of a session and select the deepest node."""
+        tree = self.query_one("#tree", Tree)
+
+        def _walk(node):
+            """DFS: find deepest node containing session_id, expanding along the way."""
+            best = None
+            for child in list(node.children):
+                data = self._get(child.data)
+                if not data:
+                    continue
+                if session_id not in data.get("session_ids", []):
+                    continue
+
+                # This node is on the path — eagerly populate and expand it
+                self._expand_node_now(child)
+
+                # Try to go deeper
+                deeper = _walk(child)
+                best = deeper or child
+
+            return best
+
+        target = _walk(tree.root)
+        if target:
+            tree.select_node(target)
+
+    def _populate_placeholder(self, node) -> None:
+        """Replace placeholder child with real chain segments and trie children."""
+        data = self._get(node.data)
+        if not data:
+            return
+
+        children = list(node.children)
+        if len(children) != 1 or children[0].data != -1:
+            return  # already populated
+
+        children[0].remove()
+
+        chain = data.get("chain")
+        trie_node = data.get("_trie_node")
+
+        if chain:
+            for i, seg in enumerate(chain):
+                msg = seg["messages"][0]
+                preview_text = _preview(msg)
+                role, role_style = _msg_role(msg)
+                msg_label = Text()
+                msg_label.append(f"{role}: ", style=role_style)
+                msg_label.append(preview_text)
+                seg_session_ids = sorted(seg["session_ids"] - {""})
+                msg_data = {
+                    "session_ids": seg_session_ids,
+                    "first_msg": msg,
+                    "last_msg": msg,
+                    "msg_count": 1,
+                    "count": seg["count"],
+                }
+
+                is_last = (i == len(chain) - 1)
+                if is_last and trie_node:
+                    # Last segment gets trie branches as children
+                    msg_data["_trie_node"] = trie_node
+                    nid = self._store(msg_data)
+                    last_node = node.add(msg_label, data=nid)
+                    last_node.add_leaf(Text("...", style="dim"), data=-1)
+                else:
+                    nid = self._store(msg_data)
+                    node.add_leaf(msg_label, data=nid)
+            data["chain"] = None
+            data["_trie_node"] = None
+        elif trie_node:
+            self._add_trie_children(node, trie_node)
+            data["_trie_node"] = None
+
+    def _expand_node_now(self, node) -> None:
+        """Eagerly populate and expand a node (bypasses async message dispatch)."""
+        self._populate_placeholder(node)
+        node.expand()
+
     def _add_trie_children(self, parent_tree_node, trie_node: dict) -> None:
         """Add one level of trie children to a Textual tree node (lazy)."""
         for _h, child in trie_node["children"].items():
@@ -464,13 +668,14 @@ class SessionTreeApp(App):
             count = chain[0]["count"]
             n_msgs = len(chain)
 
+            role, role_style = _msg_role(msg)
             label = Text()
             if n_msgs == 1:
-                role, role_style = _msg_role(msg)
                 label.append(f"{role}: ", style=role_style)
                 label.append(preview_text)
             else:
                 label.append(f"[{n_msgs} msgs] ", style="bold yellow")
+                label.append(f"{role}: ", style=role_style)
                 label.append(preview_text)
 
             if count > 1:
@@ -492,6 +697,7 @@ class SessionTreeApp(App):
                 "count": count,
                 "chain": chain if n_msgs > 1 else None,
                 "_trie_node": end_node if has_children else None,
+                "_hash_key": _h,
             }
             nid = self._store(data)
 
@@ -506,49 +712,7 @@ class SessionTreeApp(App):
 
     def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
         """Lazily populate children on first expand."""
-        self.log.info(f"expanded: node.data={event.node.data}")
-        node = event.node
-        data = self._get(node.data)
-        if not data:
-            return
-
-        # Check if children are still just the placeholder
-        children = list(node.children)
-        if len(children) != 1 or children[0].data != -1:
-            return
-
-        # Remove placeholder
-        children[0].remove()
-
-        # Expand collapsed chain into individual messages
-        chain = data.get("chain")
-        if chain:
-            for seg in chain:
-                msg = seg["messages"][0]
-                preview_text = _preview(msg)
-                role, role_style = _msg_role(msg)
-
-                msg_label = Text()
-                msg_label.append(f"{role}: ", style=role_style)
-                msg_label.append(preview_text)
-
-                seg_session_ids = sorted(seg["session_ids"] - {""})
-                msg_data = {
-                    "session_ids": seg_session_ids,
-                    "first_msg": msg,
-                    "last_msg": msg,
-                    "msg_count": 1,
-                    "count": seg["count"],
-                }
-                nid = self._store(msg_data)
-                node.add_leaf(msg_label, data=nid)
-            data["chain"] = None
-
-        # Lazily add trie branch children
-        trie_node = data.get("_trie_node")
-        if trie_node:
-            self._add_trie_children(node, trie_node)
-            data["_trie_node"] = None
+        self._populate_placeholder(event.node)
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         """Show message detail when cursor moves to a node."""
@@ -668,6 +832,174 @@ class SessionTreeApp(App):
                 result.append_text(_format_detail(last_msg))
         self.copy_to_clipboard(result.plain)
         self.notify("Copied to clipboard")
+
+    def action_focus_input(self) -> None:
+        self.query_one("#chat-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        prompt = event.value.strip()
+        if not prompt or self._streaming:
+            return
+        event.input.value = ""
+
+        # Get session_id and content_hash from selected tree node (if any)
+        tree = self.query_one("#tree", Tree)
+        node = tree.cursor_node
+        data = self._get(node.data) if node else None
+        session_id = data["session_ids"][0] if data and data.get("session_ids") else None
+        # Use last_msg hash (end of chain) for rewind target
+        content_hash = None
+        if data:
+            msg = data.get("last_msg") or data.get("first_msg")
+            if msg:
+                content_hash = msg.get("content_hash")
+
+        self._stream_chat(prompt, session_id, content_hash)
+
+    def on_key(self, event) -> None:
+        """Return focus to tree on Escape from input."""
+        if event.key == "escape" and self.focused is self.query_one("#chat-input", Input):
+            self.query_one("#tree", Tree).focus()
+
+    @work(thread=True)
+    def _stream_chat(self, prompt: str, session_id: str | None,
+                     content_hash: str | None = None) -> None:
+        claude = shutil.which("claude")
+        if not claude:
+            self.call_from_thread(self._update_status, "Error: 'claude' not found in PATH")
+            return
+
+        self._streaming = True
+        self.call_from_thread(self._update_status, "Streaming...")
+        chat_input = self.query_one("#chat-input", Input)
+        self.call_from_thread(setattr, chat_input, "disabled", True)
+
+        # Fork-rewind-resume: fork the session, rewind the fork to the
+        # selected message, then resume from there.
+        resume_id = None
+        if session_id:
+            self.call_from_thread(self._update_status, "Forking session...")
+            fork_id = self._fork_session(claude, session_id)
+            if fork_id and content_hash:
+                # Rewind the forked copy to the target message
+                fork_path = _find_session_file(fork_id, self.cwd)
+                if fork_path and _rewind_session_file(fork_path, content_hash):
+                    resume_id = fork_id
+                else:
+                    resume_id = fork_id  # rewind failed, resume from tip
+            elif fork_id:
+                resume_id = fork_id
+            else:
+                resume_id = session_id  # fork failed, resume original
+
+        cmd = [
+            claude, "--print", "--verbose", "--output-format", "stream-json",
+            "--dangerously-skip-permissions",
+        ]
+        if resume_id:
+            cmd.extend(["--resume", resume_id])
+        cmd.append(prompt)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+
+        try:
+            process = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=env, cwd=self.cwd,
+            )
+
+            # Wait for CLI to write the user message, then reload tree
+            time.sleep(0.5)
+            self.call_from_thread(
+                self.load_tree, select_session=resume_id or None,
+            )
+
+            text_so_far = ""
+            for raw_line in process.stdout:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if event.get("type") == "assistant":
+                    for block in event.get("message", {}).get("content", []):
+                        if block.get("type") == "text":
+                            text_so_far += block.get("text", "")
+                            self.call_from_thread(self._update_response, text_so_far)
+                        elif block.get("type") == "tool_use":
+                            self.call_from_thread(
+                                self._update_status,
+                                f"Using tool: {block.get('name', '')}",
+                            )
+                elif event.get("type") == "result":
+                    sid = event.get("session_id")
+                    cost = event.get("total_cost_usd")
+                    self.call_from_thread(self._finish_response, sid, cost)
+
+            process.wait()
+            if process.returncode != 0:
+                stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+                if stderr:
+                    self.call_from_thread(self._update_status, f"Error: {stderr[:200]}")
+        except Exception as exc:
+            self.call_from_thread(self._update_status, f"Error: {exc}")
+        finally:
+            self._streaming = False
+            self.call_from_thread(setattr, chat_input, "disabled", False)
+
+    def _fork_session(self, claude: str, session_id: str) -> str | None:
+        """Fork a session via the CLI, returning the new session ID."""
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+        cmd = [
+            claude, "--print", "--resume", session_id, "--fork-session",
+            "--output-format", "json", "--dangerously-skip-permissions",
+            ".",
+        ]
+        try:
+            result = subprocess.run(
+                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=env, cwd=self.cwd,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return None
+            stdout = result.stdout.decode("utf-8", errors="replace").strip()
+            # Parse JSON output for session_id
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if "session_id" in data:
+                        return data["session_id"]
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _update_response(self, text: str) -> None:
+        detail = self.query_one("#detail", Static)
+        detail.update(Text(text))
+
+    def _update_status(self, text: str) -> None:
+        status = self.query_one("#status", Static)
+        status.update(f" {text}")
+
+    def _finish_response(self, session_id: str | None, cost: float | None) -> None:
+        parts = []
+        if session_id:
+            parts.append(f"session={session_id[:8]}")
+        if cost is not None:
+            parts.append(f"cost=${cost:.4f}")
+        self._update_status(f"Done. {' '.join(parts)}")
+        self.load_tree(select_session=session_id)
 
     def action_expand_all(self) -> None:
         tree = self.query_one("#tree", Tree)
