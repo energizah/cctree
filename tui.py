@@ -794,6 +794,12 @@ class SessionTreeApp(App):
                 is_last_of_chain = (seg is chain[-1])
                 if is_last_of_chain and trie_node:
                     # Last segment gets trie branches as children
+                    n_branches = len(trie_node["children"])
+                    if n_branches > 1:
+                        branch_label = Text()
+                        branch_label.append(f"[{n_branches} branches] ", style="bold yellow")
+                        branch_label.append_text(msg_label)
+                        msg_label = branch_label
                     msg_data["_trie_node"] = trie_node
                     nid = self._store(msg_data)
                     last_node = node.add(msg_label, data=nid)
@@ -827,13 +833,19 @@ class SessionTreeApp(App):
             count = chain[0]["count"]
             n_msgs = len(chain)
 
+            end_node = chain[-1]
             role, role_style = _msg_role(msg)
+            n_branches = len(end_node["children"])
             label = Text()
-            if n_msgs == 1:
+            if n_msgs == 1 and n_branches > 1:
+                label.append(f"[{n_branches} branches] ", style="bold yellow")
+                label.append(f"{role}: ", style=role_style)
+                label.append(preview_text)
+            elif n_msgs > 1:
+                label.append(f"[{n_msgs} msgs] ", style="bold yellow")
                 label.append(f"{role}: ", style=role_style)
                 label.append(preview_text)
             else:
-                label.append(f"[{n_msgs} msgs] ", style="bold yellow")
                 label.append(f"{role}: ", style=role_style)
                 label.append(preview_text)
 
@@ -844,8 +856,6 @@ class SessionTreeApp(App):
             for seg in chain:
                 chain_session_ids.update(seg["session_ids"])
             chain_session_ids.discard("")
-
-            end_node = chain[-1]
             has_children = bool(end_node["children"])
 
             all_msgs = [seg["messages"][0] for seg in chain]
