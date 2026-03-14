@@ -609,9 +609,9 @@ class SessionTreeApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("ctrl+c", "quit", "Quit", show=False),
-        Binding("t", "recent_next", "Tip"),
+        Binding("t", "recent_next", "Latest session tip"),
         Binding("T", "recent_prev", "Prev recent tip", show=False),
-        Binding("p", "toggle_detail", "Toggle detail"),
+        Binding("p", "toggle_detail", "Detail panel"),
         Binding("o", "open_session", "Open in claude"),
         Binding("i", "focus_input", "Chat"),
         Binding("y", "yank_detail", "Copy detail"),
