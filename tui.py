@@ -553,6 +553,7 @@ class SessionTreeApp(App):
     def __init__(self, cwd: str):
         super().__init__()
         self.cwd = cwd
+        self.title = f"Claude Code Sessions — {cwd}"
         self.trie_root: dict = {}
         self.session_count = 0
         self._pending_detail = None
