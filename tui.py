@@ -22,6 +22,7 @@ Keybindings:
     /           search (incremental on labels, Enter for full content)
     n/N         next/prev search match (expands collapsed nodes)
     o           open selected session in claude --resume
+    r           reload sessions from disk
     Escape      cancel search or return to tree from input
     q           quit
 
@@ -45,11 +46,7 @@ Features:
       on highlighted node
 
 Ideas / TODO:
-    - r to reload sessions without restarting
-    - Filter by date (today, this week, etc.)
     - d to diff two selected nodes at a fork point
-    - Cost summary across sessions
-    - Bookmarks (m to mark, ' to jump)
     - w to export conversation to markdown
     - Highlight search matches in the detail panel
 """
@@ -547,6 +544,7 @@ class SessionTreeApp(App):
         Binding("y", "yank_detail", "Copy detail"),
         Binding("i", "focus_input", "Chat"),
         Binding("o", "open_session", "Open in claude"),
+        Binding("r", "reload", "Reload"),
         Binding("slash", "search", "Search", show=False),
         Binding("n", "search_next", "Next match", show=False),
         Binding("N", "search_prev", "Prev match", show=False),
@@ -987,6 +985,20 @@ class SessionTreeApp(App):
             )
         # Reload tree in case the session was modified
         self.load_tree(select_session=session_id)
+
+    def action_reload(self) -> None:
+        """Reload sessions from disk."""
+        self._loading = True
+        status = self.query_one("#status", Static)
+        status.update(" Reloading sessions...")
+        # Try to preserve position by re-selecting the current session
+        tree = self.query_one("#tree", Tree)
+        node = tree.cursor_node
+        data = self._get(node.data) if node else None
+        select = None
+        if data and data.get("session_ids"):
+            select = data["session_ids"][0]
+        self.load_tree(select_session=select)
 
     # ------------------------------------------------------------------
     # Search (Helix-style: / to open, n/N to navigate, Esc to dismiss)
