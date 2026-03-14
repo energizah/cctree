@@ -432,20 +432,14 @@ def _age_text(iso_ts: str) -> str:
     return f"{secs // 86400}d ago"
 
 
-def _age_style(tip_ts: str, is_tip: bool) -> str:
+def _age_style(tip_ts: str, is_tip: bool, most_recent_ts: str = "") -> str:
     """Return style for an age label based on session recency.
 
-    Tip node of a recent session: bold green.
-    Ancestor on a recent session's path: green (not bold).
+    Tip node of the most recent session: bold green.
+    Ancestor on the most recent session's path: green (not bold).
     Everything else: dim.
     """
-    from datetime import datetime, timezone
-    try:
-        dt = datetime.fromisoformat(tip_ts.replace("Z", "+00:00"))
-        recent = (datetime.now(timezone.utc) - dt).total_seconds() < 3600
-    except (ValueError, TypeError):
-        recent = False
-    if not recent:
+    if not most_recent_ts or tip_ts < most_recent_ts:
         return "dim"
     return "bold green" if is_tip else "#98c379"
 
@@ -633,8 +627,8 @@ class SessionTreeApp(App):
         Binding("slash", "search", "Search", show=False),
         Binding("n", "search_next", "Next match", show=False),
         Binding("N", "search_prev", "Prev match", show=False),
-        Binding("f", "recent_next", "Recent"),
-        Binding("F", "recent_prev", "Prev recent tip", show=False),
+        Binding("t", "recent_next", "Tip"),
+        Binding("T", "recent_prev", "Prev recent tip", show=False),
     ]
 
     def __init__(self, cwd: str):
@@ -644,6 +638,7 @@ class SessionTreeApp(App):
         self.trie_root: dict = {}
         self.session_count = 0
         self.session_tips: dict[str, str] = {}
+        self._most_recent_tip_ts: str = ""
         self._pending_detail = None
         self._detail_timer = None
         self._node_data: dict[int, dict] = {}  # id -> heavy data
@@ -686,6 +681,7 @@ class SessionTreeApp(App):
         """Parse sessions in a worker thread so the UI stays responsive."""
         _log.info(f"load_tree start select={select_session and select_session[:8]}")
         self.trie_root, self.session_count, self.session_tips = _build_trie(self.cwd)
+        self._most_recent_tip_ts = max(self.session_tips.values(), default="")
         _log.info(f"load_tree trie built")
         self.call_from_thread(self._render_tree, select_session)
 
@@ -868,7 +864,7 @@ class SessionTreeApp(App):
                 is_tip = (seg is chain[-1]) and not trie_node
                 msg_age = _age_text(msg_ts)
                 if msg_age:
-                    style = _age_style(best_tip_ts, is_tip)
+                    style = _age_style(best_tip_ts, is_tip, self._most_recent_tip_ts)
                     msg_label.append(f"({msg_age}) ", style=style)
 
                 msg_data = {
@@ -942,7 +938,7 @@ class SessionTreeApp(App):
             )
             msg_age = _age_text(msg_ts)
             if msg_age:
-                style = _age_style(best_tip_ts, n_msgs == 1 and not has_children)
+                style = _age_style(best_tip_ts, n_msgs == 1 and not has_children, self._most_recent_tip_ts)
                 label.append(f"({msg_age}) ", style=style)
 
             if n_msgs == 1 and n_branches > 1:
@@ -1089,7 +1085,16 @@ class SessionTreeApp(App):
         if models:
             parts.append(", ".join(sorted(models)))
 
+        if self._recent_index >= 0 and self._recent_tips:
+            parts.insert(0, f"tip {self._recent_index + 1}/{len(self._recent_tips)}")
+
         status.update(" │ ".join(parts))
+
+    async def run_action(self, action, default_namespace=None) -> bool:
+        name = action if isinstance(action, str) else action[0]
+        if name not in ("recent_next", "recent_prev"):
+            self._recent_index = -1
+        return await super().run_action(action, default_namespace)
 
     def action_cursor_down(self) -> None:
         self._snap("cursor_down")
@@ -1563,15 +1568,6 @@ class SessionTreeApp(App):
         sid = self._recent_tips[self._recent_index]
         self._select_session(sid)
 
-    def _update_recent_status(self) -> None:
-        if self._recent_tips and self._recent_index >= 0:
-            sid = self._recent_tips[self._recent_index]
-            ts = self.session_tips.get(sid, "")
-            age = _age_text(ts) if ts else "?"
-            self._update_status(
-                f"recent [{self._recent_index + 1}/{len(self._recent_tips)}]  ({age})  {sid[:8]}"
-            )
-
     def action_recent_next(self) -> None:
         if not self._recent_tips:
             self._build_recent_tips()
@@ -1580,7 +1576,6 @@ class SessionTreeApp(App):
             return
         self._recent_index = (self._recent_index + 1) % len(self._recent_tips)
         self._jump_to_recent()
-        self._update_recent_status()
 
     def action_recent_prev(self) -> None:
         if not self._recent_tips:
@@ -1590,7 +1585,6 @@ class SessionTreeApp(App):
             return
         self._recent_index = (self._recent_index - 1) % len(self._recent_tips)
         self._jump_to_recent()
-        self._update_recent_status()
 
     def _resolve_to_child(self, node, regex: re.Pattern):
         """If node is a chain, populate children and return the child that matches.
@@ -1901,6 +1895,7 @@ class SessionTreeApp(App):
         cancellation issues when called during streaming.
         """
         self.trie_root, self.session_count, self.session_tips = _build_trie(self.cwd)
+        self._most_recent_tip_ts = max(self.session_tips.values(), default="")
         self.call_from_thread(self._render_tree, select_session)
 
     def _fork_session(self, claude: str, session_id: str) -> str | None:
