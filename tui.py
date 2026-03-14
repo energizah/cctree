@@ -61,12 +61,30 @@ from pathlib import Path
 
 _log = logging.getLogger("cc-tree")
 _log.setLevel(logging.DEBUG)
-_log_handler = logging.FileHandler(Path(__file__).parent / "cc-tree.log")
-_log_handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", datefmt="%H:%M:%S"))
-_log.addHandler(_log_handler)
+_log.addHandler(logging.NullHandler())
 
-_SCREENSHOT_DIR = Path(__file__).parent / "snap"
+_SCREENSHOT_DIR: Path | None = None
+_LOG_DIR: Path | None = None
 _screenshot_seq = 0
+
+
+def _enable_logging() -> Path:
+    """Enable file logging and screenshots in a temporary directory.
+
+    Returns the log directory path.
+    """
+    global _SCREENSHOT_DIR, _LOG_DIR
+    import tempfile
+    _LOG_DIR = Path(tempfile.mkdtemp(prefix="cc-tree-"))
+    _SCREENSHOT_DIR = _LOG_DIR / "snap"
+    _SCREENSHOT_DIR.mkdir()
+
+    handler = logging.FileHandler(_LOG_DIR / "cc-tree.log")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(message)s", datefmt="%H:%M:%S"
+    ))
+    _log.addHandler(handler)
+    return _LOG_DIR
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -595,10 +613,6 @@ class SessionTreeApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        # Clear old screenshots
-        if _SCREENSHOT_DIR.exists():
-            for f in _SCREENSHOT_DIR.glob("*.svg"):
-                f.unlink()
         self._snap(f"mounted cwd={self.cwd}")
         tree = self.query_one("#tree", Tree)
         tree.root.set_label(Text(f" {self.cwd}", style="bold"))
@@ -655,12 +669,13 @@ class SessionTreeApp(App):
         return None
 
     def _snap(self, msg: str) -> None:
-        """Log a message and save an SVG screenshot."""
+        """Log a message and save an SVG screenshot (no-op if --log not set)."""
+        if _SCREENSHOT_DIR is None:
+            return
         global _screenshot_seq
         _log.info(msg)
         try:
             svg = self.export_screenshot(title=msg)
-            _SCREENSHOT_DIR.mkdir(exist_ok=True)
             fname = _SCREENSHOT_DIR / f"{_screenshot_seq:04d}.svg"
             _screenshot_seq += 1
             fname.write_text(svg)
@@ -1815,11 +1830,21 @@ def main():
     )
     parser.add_argument("directory", nargs="?", default=str(Path.cwd()),
                         help="project directory to scan (default: cwd)")
+    parser.add_argument("--log", action="store_true",
+                        help="enable logging and screenshots to a temp directory")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     args = parser.parse_args()
 
-    app = SessionTreeApp(args.directory)
-    app.run()
+    log_dir = None
+    if args.log:
+        log_dir = _enable_logging()
+
+    try:
+        app = SessionTreeApp(args.directory)
+        app.run()
+    finally:
+        if log_dir:
+            print(f"Log directory: {log_dir}")
 
 
 if __name__ == "__main__":
