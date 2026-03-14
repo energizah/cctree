@@ -65,7 +65,7 @@ _log_handler = logging.FileHandler(Path(__file__).parent / "cc-tree.log")
 _log_handler.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", datefmt="%H:%M:%S"))
 _log.addHandler(_log_handler)
 
-_SCREENSHOT_DIR = Path(__file__).parent / "cc-tree-screenshots"
+_SCREENSHOT_DIR = Path(__file__).parent / "snap"
 _screenshot_seq = 0
 
 from rich.text import Text
@@ -168,16 +168,20 @@ def _rewind_session_file(path: Path, target_hash: str) -> bool:
 
     # Find cutoff line for target_hash
     cutoff_line = None
+    all_hashes = []
     for entry in coalesced:
         msg = entry["message"]
         role = msg.get("role", "")
         content = msg.get("content", "")
         raw = json.dumps(content, sort_keys=True)
         h = hashlib.sha256(f"{role}:{raw}".encode()).hexdigest()[:16]
+        all_hashes.append(h)
         cutoff_line = entry["_last_line"]
         if h == target_hash:
             break
     else:
+        _log.info(f"rewind: target {target_hash} not in {len(all_hashes)} hashes")
+        _log.info(f"rewind: last 5 hashes: {all_hashes[-5:]}")
         return False
 
     # Rewrite file truncated at cutoff
@@ -660,12 +664,17 @@ class SessionTreeApp(App):
             _log.info(f"  screenshot failed: {e}")
 
     def _select_session(self, session_id: str) -> None:
-        """Expand the tree along the path of a session and select the deepest node."""
+        """Navigate to the fork point for a session and select it.
+
+        Only expands fork points (nodes with multiple session-bearing
+        children) and the final target's parent — intermediate chain
+        nodes are populated for walking but stay collapsed.
+        """
         self._snap(f"_select_session {session_id[:8]}")
         tree = self.query_one("#tree", Tree)
 
         def _walk(node):
-            """DFS: find deepest node containing session_id, expanding along the way."""
+            """DFS: find deepest node containing session_id, populating along the way."""
             best = None
             for child in list(node.children):
                 data = self._get(child.data)
@@ -674,8 +683,8 @@ class SessionTreeApp(App):
                 if session_id not in data.get("session_ids", []):
                     continue
 
-                # This node is on the path — eagerly populate and expand it
-                self._expand_node_now(child)
+                # Populate children so we can walk deeper, but don't expand yet.
+                self._populate_placeholder(child)
 
                 # Try to go deeper
                 deeper = _walk(child)
@@ -684,11 +693,37 @@ class SessionTreeApp(App):
             return best
 
         target = _walk(tree.root)
-        if target:
-            tree.select_node(target)
+        if not target:
+            return
 
-    def _populate_placeholder(self, node) -> None:
-        """Replace placeholder child with real chain segments and trie children."""
+        # Collect ancestors from target to root
+        ancestors = []
+        node = target
+        while node is not None and node is not tree.root:
+            ancestors.append(node)
+            node = node.parent
+        ancestors.reverse()  # root-first order
+
+        # Expand ancestors on the path so the target is visible.
+        for anc in ancestors:
+            self._populate_placeholder(anc)
+            if anc is not target:
+                anc.expand()
+                self._snap(f"expanded node={anc.data} label={anc.label.plain[:40]}")
+
+        def _finish_select():
+            tree.select_node(target)
+            tree.scroll_to_node(target)
+        self.call_after_refresh(_finish_select)
+
+    def _populate_placeholder(self, node, *, tail_only: bool = False) -> None:
+        """Replace placeholder child with real chain segments and trie children.
+
+        If *tail_only* is True and the node has a chain, only the last segment
+        (the fork point) is shown; the earlier segments are collapsed into a
+        single ``[N earlier msgs]`` summary node.  This avoids flooding the
+        tree with dozens of individual messages when navigating to a session.
+        """
         data = self._get(node.data)
         if not data:
             return
@@ -704,7 +739,39 @@ class SessionTreeApp(App):
         trie_node = data.get("_trie_node")
 
         if chain:
-            for i, seg in enumerate(chain):
+            # Determine which segments to render individually
+            if tail_only and len(chain) > 1 and trie_node:
+                # Collapse the first N-1 segments into a summary node
+                head = chain[:-1]
+                head_session_ids: set[str] = set()
+                for seg in head:
+                    head_session_ids.update(seg["session_ids"])
+                head_session_ids.discard("")
+                head_msgs = [seg["messages"][0] for seg in head]
+                summary_label = Text()
+                summary_label.append(
+                    f"[{len(head)} earlier msgs]", style="dim italic"
+                )
+                summary_data = {
+                    "session_ids": sorted(head_session_ids),
+                    "first_msg": head_msgs[0],
+                    "last_msg": head_msgs[-1],
+                    "msgs": head_msgs,
+                    "msg_count": len(head),
+                    "count": head[0]["count"],
+                    "chain": head,
+                    "_trie_node": None,
+                }
+                snid = self._store(summary_data)
+                summary_node = node.add(summary_label, data=snid)
+                summary_node.add_leaf(Text("...", style="dim"), data=-1)
+
+                # Only render the last segment (fork point)
+                segments_to_render = [chain[-1]]
+            else:
+                segments_to_render = chain
+
+            for i, seg in enumerate(segments_to_render):
                 msg = seg["messages"][0]
                 preview_text = _preview(msg)
                 role, role_style = _msg_role(msg)
@@ -720,8 +787,8 @@ class SessionTreeApp(App):
                     "count": seg["count"],
                 }
 
-                is_last = (i == len(chain) - 1)
-                if is_last and trie_node:
+                is_last_of_chain = (seg is chain[-1])
+                if is_last_of_chain and trie_node:
                     # Last segment gets trie branches as children
                     msg_data["_trie_node"] = trie_node
                     nid = self._store(msg_data)
@@ -865,9 +932,10 @@ class SessionTreeApp(App):
 
     def _update_status_bar(self, data: dict | None) -> None:
         """Update status bar with session metadata for the highlighted node."""
-        if self._loading:
-            return
         status = self.query_one("#status", Static)
+        if self._loading:
+            status.update(" Loading sessions...")
+            return
         base = f" {self.session_count} sessions"
 
         if not data:
@@ -1563,51 +1631,65 @@ class SessionTreeApp(App):
                    f"allow_expand={node.allow_expand} label={node.label.plain[:40]}")
         self._populate_placeholder(node)
 
-        if not node.allow_expand:
-            # Node is a leaf in a chain — split the chain at this point.
-            parent = node.parent
-            if not parent:
-                return
+        # Save scroll position — nothing above the fork point changes
+        scroll_y = tree.scroll_offset.y
 
-            # Snapshot siblings after the selected node (chain continuation)
-            siblings = list(parent.children)
-            idx = next((i for i, s in enumerate(siblings) if s is node), None)
-            if idx is None:
-                return
-            after_info = []
-            for s in siblings[idx + 1:]:
-                has_children = s.allow_expand
-                after_info.append((s.label, s.data, has_children))
+        with self.batch_update():
+            if not node.allow_expand:
+                # Node is a leaf in a chain — split the chain at this point.
+                parent = node.parent
+                if not parent:
+                    return
 
-            self._snap(f"  splitting chain at idx={idx}, {len(after_info)} siblings after")
+                # Snapshot siblings after the selected node (chain continuation)
+                siblings = list(parent.children)
+                idx = next((i for i, s in enumerate(siblings) if s is node), None)
+                if idx is None:
+                    return
+                after = siblings[idx + 1:]
+                n_after = len(after)
 
-            # Remove the selected node and everything after it
-            for s in siblings[idx:]:
-                s.remove()
+                _log.info(f"  splitting chain at idx={idx}, {n_after} siblings after")
 
-            # Re-add selected node as a branch (fork point)
-            fork_node = parent.add(node.label, data=node.data)
-            self._snap(f"  fork_node created, adding {len(after_info)} continuation + 1 pending")
+                # Grab label/data of first continuation sibling for the summary
+                first_after_label = after[0].label if after else None
+                first_after_data = after[0].data if after else None
 
-            # Re-add chain continuation as children of the fork
-            for lbl, dat, expandable in after_info:
-                if expandable:
-                    child = fork_node.add(lbl, data=dat)
-                    child.add_leaf(Text("...", style="dim"), data=-1)
-                else:
-                    fork_node.add_leaf(lbl, data=dat)
-        else:
-            fork_node = node
+                # Remove the selected node and everything after it
+                for s in siblings[idx:]:
+                    s.remove()
 
-        # Add the pending user message as a new fork branch
-        label = Text()
-        label.append("☻: ", style="bold cyan")
-        label.append(prompt)
-        label.append("  ⏳", style="dim italic")
-        pending = fork_node.add_leaf(label, data=-2)  # -2 = pending sentinel
-        fork_node.expand()
-        tree.select_node(pending)
-        self.call_after_refresh(lambda: tree.scroll_to_node(pending))
+                # Re-add selected node as a branch (fork point)
+                fork_node = parent.add(node.label, data=node.data)
+
+                # Collapse continuation into a single summary node
+                if n_after > 0:
+                    cont_label = Text()
+                    cont_label.append(f"[{n_after} msgs] ", style="bold yellow")
+                    cont_label.append_text(first_after_label)
+                    cont = fork_node.add(cont_label, data=first_after_data)
+                    cont.add_leaf(Text("...", style="dim"), data=-1)
+
+                _log.info(f"  fork_node created, 1 continuation + 1 pending")
+            else:
+                fork_node = node
+
+            # Add the pending user message as a new fork branch
+            label = Text()
+            label.append("☻: ", style="bold cyan")
+            label.append(prompt)
+            label.append("  ⏳", style="dim italic")
+            pending = fork_node.add_leaf(label, data=-2)  # -2 = pending sentinel
+
+        def _expand():
+            fork_node.expand()
+            tree.scroll_to(0, scroll_y, animate=False)
+            def _select():
+                tree.select_node(pending)
+                tree.scroll_to_node(pending)
+                self._snap(f"  fork done, pending node selected")
+            self.call_after_refresh(_select)
+        self.call_after_refresh(_expand)
 
     def _reload_tree_inline(self, select_session: str | None = None) -> None:
         """Rebuild trie in current thread and render on main thread.
