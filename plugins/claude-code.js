@@ -292,7 +292,6 @@ class ClaudeCodeFeature extends FeaturePlugin {
             position: this.graph.autoPosition(parentIds),
         });
         this.graph.addNode(humanNode);
-        this.canvas.renderNode(humanNode);
 
         // Create edges from parents
         for (const parentId of parentIds) {
@@ -302,7 +301,6 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 parentIds.length > 1 ? EdgeType.MERGE : EdgeType.REPLY,
             );
             this.graph.addEdge(edge);
-            this.canvas.renderEdge(edge);
             this.updateCollapseButtonForNode?.(parentId);
         }
 
@@ -315,11 +313,9 @@ class ClaudeCodeFeature extends FeaturePlugin {
             model: 'claude-code',
         });
         this.graph.addNode(aiNode);
-        this.canvas.renderNode(aiNode);
 
         const aiEdge = createEdge(humanNode.id, aiNode.id, EdgeType.REPLY);
         this.graph.addEdge(aiEdge);
-        this.canvas.renderEdge(aiEdge);
         this.updateCollapseButtonForNode?.(humanNode.id);
 
         // Stream Claude Code response
@@ -462,7 +458,7 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 const resp = await fetch(apiUrl('/api/claude-code/fork'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId }),
+                    body: JSON.stringify({ session_id: sessionId, cwd: this.forkIndex.cwd }),
                 });
 
                 if (!resp.ok) {
@@ -559,7 +555,6 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 }
 
                 this.graph.addNode(node);
-                this.canvas.renderNode(node);
 
                 if (nodeData.claude_uuid) {
                     this.forkIndex.set(node.id, {
@@ -574,7 +569,6 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 const edge = createEdge(edgeData.source, edgeData.target, edgeData.type);
                 edge.id = edgeData.id;
                 this.graph.addEdge(edge);
-                this.canvas.renderEdge(edge);
             }
 
             this.forkIndex.activeSessionId = sessionId;
@@ -628,7 +622,6 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 width: 600,
             });
             this.graph.addNode(node);
-            this.canvas.renderNode(node);
             this.canvas.selectNode(node.id);
             this.saveSession();
         } catch (err) {

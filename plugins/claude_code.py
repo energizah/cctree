@@ -36,6 +36,7 @@ class ChatRequest(BaseModel):
 
 class ForkRequest(BaseModel):
     session_id: str
+    cwd: Optional[str] = None
 
 
 class ImportRequest(BaseModel):
@@ -59,7 +60,7 @@ def _claude_bin() -> str:
 
 def _subprocess_env() -> dict[str, str]:
     """Build env for the claude subprocess, stripping CLAUDECODE to avoid nesting."""
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
     return env
 
 
@@ -106,6 +107,7 @@ async def claude_code_chat(req: ChatRequest, request: Request):
     cmd = [
         claude,
         "--print",
+        "--verbose",
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
     ]
@@ -113,14 +115,19 @@ async def claude_code_chat(req: ChatRequest, request: Request):
         cmd.extend(["--resume", req.session_id])
     cmd.append(req.prompt)
 
+    env = _subprocess_env()
+    cwd = req.cwd or "/tmp"
+    logger.info("Spawning: %s (cwd=%s)", " ".join(cmd), cwd)
+
     async def generate():
         try:
             process = await anyio.open_process(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=_subprocess_env(),
-                cwd=req.cwd or str(Path.home()),
+                env=env,
+                cwd=cwd,
             )
         except Exception as exc:
             yield {"event": "error", "data": f"Failed to start claude: {exc}"}
@@ -154,22 +161,43 @@ async def claude_code_chat(req: ChatRequest, request: Request):
                     except json.JSONDecodeError:
                         continue
 
-                    match (event.get("type"), event.get("subtype")):
-                        case ("assistant", "text"):
-                            yield {"event": "message", "data": event.get("text", "")}
-                        case ("assistant", "tool_use"):
-                            yield {
-                                "event": "status",
-                                "data": f"Using tool: {event.get('name', '')}",
-                            }
-                        case ("assistant", "tool_result"):
-                            pass
-                        case ("result", _):
+                    etype = event.get("type")
+
+                    match etype:
+                        case "assistant":
+                            # Full message object with content array
+                            msg = event.get("message", {})
+                            content = msg.get("content", [])
+                            if isinstance(content, list):
+                                for block in content:
+                                    match block.get("type"):
+                                        case "text":
+                                            yield {"event": "message", "data": block.get("text", "")}
+                                        case "tool_use":
+                                            yield {
+                                                "event": "status",
+                                                "data": f"Using tool: {block.get('name', '')}",
+                                            }
+                                        case "tool_result":
+                                            pass
+                        case "result":
                             result_session_id = event.get("session_id")
-                            cost_usd = event.get("cost_usd")
+                            cost_usd = event.get("total_cost_usd", event.get("cost_usd"))
 
             # Wait for process to finish
             await process.wait()
+
+            # Check stderr for errors
+            if process.returncode != 0:
+                try:
+                    stderr_data = await process.stderr.receive(4096)
+                    stderr_text = stderr_data.decode("utf-8", errors="replace").strip()
+                except anyio.EndOfStream:
+                    stderr_text = ""
+                if stderr_text:
+                    logger.error("claude stderr: %s", stderr_text)
+                    yield {"event": "error", "data": stderr_text}
+                    return
 
             # Send done event with metadata
             done_data = {}
@@ -209,10 +237,14 @@ async def claude_code_fork(req: ForkRequest):
         ".",
     ]
 
+    cwd = req.cwd or "/tmp"
+
     try:
         result = await anyio.run_process(
             cmd,
+            stdin=subprocess.DEVNULL,
             env=_subprocess_env(),
+            cwd=cwd,
             check=False,
         )
     except Exception as exc:
