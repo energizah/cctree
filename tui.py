@@ -626,6 +626,8 @@ class SessionTreeApp(App):
         Binding("slash", "search", "Search", show=False),
         Binding("n", "search_next", "Next match", show=False),
         Binding("N", "search_prev", "Prev match", show=False),
+        Binding("f", "recent_next", "Recent"),
+        Binding("F", "recent_prev", "Prev recent tip", show=False),
     ]
 
     def __init__(self, cwd: str):
@@ -646,6 +648,8 @@ class SessionTreeApp(App):
         self._search_pattern: str = ""
         self._pre_search_expanded: set = set()
         self._search_expanded: set = set()
+        self._recent_tips: list[str] = []  # session IDs, sorted most-recent-first
+        self._recent_index: int = -1
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -680,6 +684,8 @@ class SessionTreeApp(App):
 
     def _render_tree(self, select_session: str | None = None) -> None:
         self._snap(f"_render_tree start select={select_session and select_session[:8]}")
+        self._recent_tips = []
+        self._recent_index = -1
         tree = self.query_one("#tree", Tree)
         tree.root.remove_children()
         self._add_trie_children(tree.root, self.trie_root)
@@ -1527,6 +1533,57 @@ class SessionTreeApp(App):
         self._search_index = (self._search_index - 1) % len(self._search_matches)
         self._jump_to_match()
         self._update_search_status()
+
+    # --- Recent tips navigation (f / F) ---
+
+    def _build_recent_tips(self) -> None:
+        """Build list of session IDs sorted by most-recent tip first.
+
+        Walks the trie (not the tree widget) to avoid populating nodes.
+        """
+        # Sort sessions by tip timestamp, most recent first
+        sorted_sids = sorted(
+            self.session_tips.keys(),
+            key=lambda sid: self.session_tips[sid],
+            reverse=True,
+        )
+        self._recent_tips = sorted_sids
+        self._recent_index = -1
+
+    def _jump_to_recent(self) -> None:
+        if not self._recent_tips or self._recent_index < 0:
+            return
+        sid = self._recent_tips[self._recent_index]
+        self._select_session(sid)
+
+    def _update_recent_status(self) -> None:
+        if self._recent_tips and self._recent_index >= 0:
+            sid = self._recent_tips[self._recent_index]
+            ts = self.session_tips.get(sid, "")
+            age = _age_text(ts) if ts else "?"
+            self._update_status(
+                f"recent [{self._recent_index + 1}/{len(self._recent_tips)}]  ({age})  {sid[:8]}"
+            )
+
+    def action_recent_next(self) -> None:
+        if not self._recent_tips:
+            self._build_recent_tips()
+        if not self._recent_tips:
+            self._update_status("No session tips found")
+            return
+        self._recent_index = (self._recent_index + 1) % len(self._recent_tips)
+        self._jump_to_recent()
+        self._update_recent_status()
+
+    def action_recent_prev(self) -> None:
+        if not self._recent_tips:
+            self._build_recent_tips()
+        if not self._recent_tips:
+            self._update_status("No session tips found")
+            return
+        self._recent_index = (self._recent_index - 1) % len(self._recent_tips)
+        self._jump_to_recent()
+        self._update_recent_status()
 
     def _resolve_to_child(self, node, regex: re.Pattern):
         """If node is a chain, populate children and return the child that matches.
