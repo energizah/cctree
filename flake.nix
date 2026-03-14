@@ -11,7 +11,12 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         python = pkgs.python311;
+        pythonEnv = pkgs.python3.withPackages (ps: [ ps.textual ]);
       in {
+        packages.default = pkgs.writeShellScriptBin "cc-tree" ''
+          exec ${pythonEnv}/bin/python ${./tui.py} "$@"
+        '';
+
         devShells.default = pkgs.mkShell {
           buildInputs = [
             python

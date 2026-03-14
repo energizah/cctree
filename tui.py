@@ -463,6 +463,7 @@ class SessionTreeApp(App):
         border-right: solid $accent;
     }
     #detail {
+        display: none;
         width: 2fr;
         padding: 1 2;
         overflow-y: auto;
@@ -478,6 +479,10 @@ class SessionTreeApp(App):
         height: 1fr;
     }
     #chat-input {
+        margin: 0 1;
+    }
+    #search-input {
+        display: none;
         margin: 0 1;
     }
     """
@@ -497,6 +502,9 @@ class SessionTreeApp(App):
         Binding("p", "toggle_detail", "Toggle detail"),
         Binding("y", "yank_detail", "Copy detail"),
         Binding("i", "focus_input", "Chat"),
+        Binding("slash", "search", "Search", show=False),
+        Binding("n", "search_next", "Next match", show=False),
+        Binding("N", "search_prev", "Prev match", show=False),
     ]
 
     def __init__(self, cwd: str):
@@ -509,6 +517,11 @@ class SessionTreeApp(App):
         self._node_data: dict[int, dict] = {}  # id -> heavy data
         self._next_id = 0
         self._streaming = False
+        self._search_matches: list = []
+        self._search_index: int = -1
+        self._search_pattern: str = ""
+        self._pre_search_expanded: set = set()
+        self._search_expanded: set = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -519,6 +532,7 @@ class SessionTreeApp(App):
             placeholder="Send a message (Enter to send, selected node = resume context)",
             id="chat-input",
         )
+        yield Input(placeholder="/", id="search-input")
         yield Static("", id="status")
         yield Footer()
 
@@ -855,7 +869,293 @@ class SessionTreeApp(App):
     def action_focus_input(self) -> None:
         self.query_one("#chat-input", Input).focus()
 
+    # ------------------------------------------------------------------
+    # Search (Helix-style: / to open, n/N to navigate, Esc to dismiss)
+    # ------------------------------------------------------------------
+
+    def action_search(self) -> None:
+        search = self.query_one("#search-input", Input)
+        search.display = True
+        search.value = ""
+        search.focus()
+        # Snapshot which nodes are currently expanded
+        self._pre_search_expanded = self._snapshot_expanded()
+        self._search_expanded: set = set()  # nodes we expanded for search
+
+    def _snapshot_expanded(self) -> set:
+        """Return set of node ids that are currently expanded."""
+        tree = self.query_one("#tree", Tree)
+        expanded = set()
+
+        def _walk(node):
+            if node.is_expanded and node != tree.root:
+                expanded.add(id(node))
+            for child in node.children:
+                _walk(child)
+
+        _walk(tree.root)
+        return expanded
+
+    def _restore_search_expanded(self) -> None:
+        """Collapse nodes that were expanded only for search navigation."""
+        for node in list(self._search_expanded):
+            if node.is_expanded:
+                node.collapse()
+        self._search_expanded.clear()
+
+    def _collect_nodes(self, expand_all: bool = False):
+        """Walk tree nodes in depth-first order.
+
+        If *expand_all* is True, lazily populates collapsed nodes so that
+        the entire tree is searchable.  Otherwise only visible (expanded)
+        subtrees are walked.
+        """
+        tree = self.query_one("#tree", Tree)
+        nodes = []
+
+        def _walk(node):
+            if node != tree.root:
+                nodes.append(node)
+            if expand_all:
+                self._populate_placeholder(node)
+                for child in node.children:
+                    _walk(child)
+            elif node.is_expanded:
+                for child in node.children:
+                    _walk(child)
+
+        _walk(tree.root)
+        return nodes
+
+    def _rg_matching_sessions(self, pattern: str) -> set[str] | None:
+        """Use rg to find session files containing pattern.  Returns session IDs or None on error."""
+        rg = shutil.which("rg") or shutil.which("grep")
+        if not rg:
+            return None
+        is_grep = rg.endswith("grep")
+        base = _sessions_dir()
+        encoded = _encode_cwd(self.cwd)
+        dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith(encoded)]
+        if not dirs:
+            return set()
+        try:
+            if is_grep:
+                cmd = [rg, "--files-with-matches", "--ignore-case",
+                       "--recursive", "--include=*.jsonl", "-E", "--", pattern] + [str(d) for d in dirs]
+            else:
+                cmd = [rg, "--files-with-matches", "--ignore-case",
+                       "--", pattern] + [str(d) for d in dirs]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=10,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode not in (0, 1):  # 1 = no matches
+            return None
+        sessions = set()
+        for line in result.stdout.splitlines():
+            p = Path(line)
+            if p.suffix == ".jsonl":
+                sessions.add(p.stem)
+        return sessions
+
+    def _node_matches(self, node, regex: re.Pattern, rg_sessions: set[str] | None = None) -> bool:
+        """Check if a tree node matches the compiled regex."""
+        if regex.search(node.label.plain):
+            return True
+        data = self._get(node.data) if node.data and node.data != -1 else None
+        if not data:
+            return False
+        # Fast path: if rg found no matching sessions for this node, skip content check
+        if rg_sessions is not None:
+            node_sessions = set(data.get("session_ids", []))
+            if not node_sessions & rg_sessions:
+                return False
+        # Check all messages in the chain
+        for msg in data.get("msgs") or []:
+            text = _extract_text_content(msg.get("message", {}))
+            if regex.search(text):
+                return True
+        # Fallback to first_msg if msgs not populated
+        if not data.get("msgs"):
+            first = data.get("first_msg")
+            if first:
+                text = _extract_text_content(first.get("message", {}))
+                if regex.search(text):
+                    return True
+        return False
+
+    def _compile_pattern(self, pattern: str) -> re.Pattern | None:
+        """Compile a search pattern as regex (case-insensitive), return None on bad regex."""
+        try:
+            return re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            return None
+
+    def _run_search(self, pattern: str, forward: bool = True) -> None:
+        """Find all nodes matching pattern and jump to the first one."""
+        if not pattern:
+            self._search_matches = []
+            self._search_index = -1
+            self._search_pattern = ""
+            return
+
+        self._search_pattern = pattern
+        regex = self._compile_pattern(pattern)
+        if not regex:
+            self._search_matches = []
+            self._search_index = -1
+            self._update_search_status()
+            return
+        nodes = self._collect_nodes(expand_all=False)
+
+        # Incremental: match labels only (fast)
+        self._search_matches = [
+            n for n in nodes if regex.search(n.label.plain)
+        ]
+
+        if self._search_matches:
+            # Start from nearest match after current cursor
+            tree = self.query_one("#tree", Tree)
+            cur = tree.cursor_node
+            self._search_index = 0
+            if cur:
+                for i, m in enumerate(self._search_matches):
+                    if m.id == cur.id:
+                        self._search_index = i
+                        break
+                    # Pick first match after cursor position
+                    if m.line > (cur.line if hasattr(cur, 'line') else 0):
+                        self._search_index = i
+                        break
+            self._jump_to_match()
+        else:
+            self._search_index = -1
+
+        self._update_search_status()
+
+    def _jump_to_match(self) -> None:
+        if not self._search_matches or self._search_index < 0:
+            return
+        # Collapse nodes we expanded for the previous match
+        self._restore_search_expanded()
+
+        tree = self.query_one("#tree", Tree)
+        node = self._search_matches[self._search_index]
+        pre = getattr(self, "_pre_search_expanded", set())
+        # Expand ancestors so the node is visible, tracking what we expand
+        ancestors = []
+        p = node.parent
+        while p is not None:
+            ancestors.append(p)
+            p = p.parent
+        for a in reversed(ancestors):
+            if not a.is_expanded:
+                self._expand_node_now(a)
+                if id(a) not in pre:
+                    self._search_expanded.add(a)
+        # Defer select+scroll so the tree layout reflects newly expanded nodes
+        def _do_select():
+            tree.select_node(node)
+            tree.scroll_to_node(node)
+        self.call_after_refresh(_do_select)
+
+    def _update_search_status(self) -> None:
+        if self._search_matches:
+            self._update_status(
+                f"/{self._search_pattern}  [{self._search_index + 1}/{len(self._search_matches)}]"
+            )
+        elif self._search_pattern:
+            self._update_status(f"/{self._search_pattern}  [no matches]")
+
+    def action_search_next(self) -> None:
+        if not self._search_pattern:
+            return
+        self._refresh_matches(expand_all=True)
+        if not self._search_matches:
+            return
+        self._search_index = (self._search_index + 1) % len(self._search_matches)
+        self._jump_to_match()
+        self._update_search_status()
+
+    def action_search_prev(self) -> None:
+        if not self._search_pattern:
+            return
+        self._refresh_matches(expand_all=True)
+        if not self._search_matches:
+            return
+        self._search_index = (self._search_index - 1) % len(self._search_matches)
+        self._jump_to_match()
+        self._update_search_status()
+
+    def _resolve_to_child(self, node, regex: re.Pattern):
+        """If node is a chain, populate children and return the child that matches.
+
+        Only populates — does NOT expand or track.  _jump_to_match handles
+        ancestor expansion so there's no collapse/re-expand race.
+        """
+        data = self._get(node.data) if node.data and node.data != -1 else None
+        if not data or (data.get("msg_count", 1) <= 1):
+            return node
+        # Populate children without expanding (so _jump_to_match can manage it)
+        self._populate_placeholder(node)
+        # Find the child whose single message matches
+        for child in node.children:
+            if self._node_matches(child, regex):
+                return child
+        # Fallback: return the chain node itself
+        return node
+
+    def _refresh_matches(self, expand_all: bool = False) -> None:
+        """Re-collect matches, preserving current position."""
+        regex = self._compile_pattern(self._search_pattern)
+        if not regex:
+            self._search_matches = []
+            self._search_index = -1
+            return
+        rg_sessions = self._rg_matching_sessions(self._search_pattern)
+        nodes = self._collect_nodes(expand_all=expand_all)
+        old_node = (self._search_matches[self._search_index]
+                    if self._search_matches and 0 <= self._search_index < len(self._search_matches)
+                    else None)
+        raw = [n for n in nodes if self._node_matches(n, regex, rg_sessions)]
+        # Drill into chain nodes to find the specific child
+        self._search_matches = [self._resolve_to_child(n, regex) for n in raw]
+        # Deduplicate (a child may appear if both parent chain and child matched)
+        seen = set()
+        deduped = []
+        for n in self._search_matches:
+            if id(n) not in seen:
+                seen.add(id(n))
+                deduped.append(n)
+        self._search_matches = deduped
+        # Restore index to the previously selected node
+        self._search_index = 0
+        if old_node:
+            for i, m in enumerate(self._search_matches):
+                if m is old_node:
+                    self._search_index = i
+                    break
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Incremental search as user types."""
+        if event.input.id == "search-input":
+            self._run_search(event.value)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "search-input":
+            # Confirm search — do full content search, keep expansion, dismiss
+            search = self.query_one("#search-input", Input)
+            search.display = False
+            if self._search_pattern:
+                self._refresh_matches(expand_all=True)
+                if self._search_matches:
+                    self._jump_to_match()
+                self._update_search_status()
+            self._search_expanded.clear()
+            self.query_one("#tree", Tree).focus()
+            return
+
         prompt = event.value.strip()
         if not prompt or self._streaming:
             return
@@ -880,8 +1180,18 @@ class SessionTreeApp(App):
 
     def on_key(self, event) -> None:
         """Return focus to tree on Escape from input."""
-        if event.key == "escape" and self.focused is self.query_one("#chat-input", Input):
-            self.query_one("#tree", Tree).focus()
+        if event.key == "escape":
+            search = self.query_one("#search-input", Input)
+            if self.focused is search:
+                search.display = False
+                self._restore_search_expanded()
+                self._search_matches = []
+                self._search_index = -1
+                self._search_pattern = ""
+                self.query_one("#tree", Tree).focus()
+                return
+            if self.focused is self.query_one("#chat-input", Input):
+                self.query_one("#tree", Tree).focus()
 
     def _ts(self) -> str:
         """Return a compact timestamp for logging."""
@@ -1074,9 +1384,22 @@ class SessionTreeApp(App):
         tree.root.collapse_all()
 
 
+VERSION = "0.1.0"
+
+
 def main():
-    cwd = sys.argv[1] if len(sys.argv) > 1 else str(Path.cwd())
-    app = SessionTreeApp(cwd)
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="cc-tree",
+        description="Interactive TUI for browsing Claude Code session trees.",
+    )
+    parser.add_argument("directory", nargs="?", default=str(Path.cwd()),
+                        help="project directory to scan (default: cwd)")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    args = parser.parse_args()
+
+    app = SessionTreeApp(args.directory)
     app.run()
 
 
