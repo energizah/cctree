@@ -506,7 +506,6 @@ class TestImportDag:
         """Two sessions with identical first 2 messages diverge at msg 3."""
         u1, a1 = str(uuid4()), str(uuid4())
 
-        # Session A: u1 → a1 → u2a → a2a
         u2a, a2a = str(uuid4()), str(uuid4())
         _write_jsonl(dag_dir / "sess-a.jsonl", [
             _make_record("user", u1, content="hello", sessionId="sess-a"),
@@ -515,7 +514,6 @@ class TestImportDag:
             _make_record("assistant", a2a, parent_uuid=u2a, content="reply A", sessionId="sess-a"),
         ])
 
-        # Session B: same first 2 messages, diverges at msg 3
         u2b, a2b = str(uuid4()), str(uuid4())
         _write_jsonl(dag_dir / "sess-b.jsonl", [
             _make_record("user", u1, content="hello", sessionId="sess-b"),
@@ -525,24 +523,16 @@ class TestImportDag:
         ])
 
         result = self._run_dag(tmp_path)
-
-        # Shared prefix (hello + hi) collapses into 1 note node.
-        # Then 2 branches, each with 2 messages collapsed.
-        # Total: 3 nodes (1 shared + 2 branches)
         assert result["session_count"] == 2
-        assert len(result["nodes"]) == 3
-
-        # The shared node should have collapsed_count == 2
-        shared = [n for n in result["nodes"] if n["session_count"] == 2]
-        assert len(shared) == 1
-        assert shared[0]["collapsed_count"] == 2
-
-        # Branch edges
-        branch_edges = [e for e in result["edges"] if e["type"] == "branch"]
-        assert len(branch_edges) == 2
+        tree = result["tree"]
+        # Shared prefix should show ×2
+        assert "×2" in tree
+        # Both branches should appear
+        assert "branch A" in tree
+        assert "branch B" in tree
 
     def test_no_shared_prefix(self, tmp_path, dag_dir):
-        """Two sessions with different first messages produce independent trees."""
+        """Two sessions with different first messages produce independent lines."""
         _write_jsonl(dag_dir / "sess-a.jsonl", [
             _make_record("user", str(uuid4()), content="apple", sessionId="sess-a"),
         ])
@@ -552,11 +542,12 @@ class TestImportDag:
 
         result = self._run_dag(tmp_path)
         assert result["session_count"] == 2
-        assert len(result["nodes"]) == 2
-        assert len(result["edges"]) == 0
+        tree = result["tree"]
+        assert "apple" in tree
+        assert "banana" in tree
 
     def test_long_linear_collapses(self, tmp_path, dag_dir):
-        """A single session with 10 messages collapses to 1 node."""
+        """A single session with 10 messages collapses to one line."""
         records = []
         prev = None
         for i in range(10):
@@ -571,5 +562,8 @@ class TestImportDag:
 
         result = self._run_dag(tmp_path)
         assert result["session_count"] == 1
-        assert len(result["nodes"]) == 1
-        assert result["nodes"][0]["collapsed_count"] == 10
+        tree = result["tree"]
+        # 10 messages should collapse to a single line with [10 msgs]
+        assert "[10 msgs]" in tree
+        lines = [l for l in tree.split("\n") if l.strip()]
+        assert len(lines) == 1

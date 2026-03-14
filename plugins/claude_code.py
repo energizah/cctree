@@ -610,6 +610,7 @@ def _parse_session_file(path: Path) -> list[dict]:
 class ImportDagRequest(BaseModel):
     cwd: str
     max_tool_output: int = Field(default=2000, ge=0)
+    format: str = Field(default="tree", pattern="^(tree|nodes)$")
 
 
 @app.post("/api/claude-code/import-dag")
@@ -658,6 +659,139 @@ async def claude_code_import_dag(req: ImportDagRequest):
             node = node["children"][h]
             node["count"] += 1
             node["session_ids"].add(msg["session_id"])
+
+    # -- Tree format: compact text rendering of the DAG --
+    if req.format == "tree":
+        lines: list[str] = []
+
+        def _preview(msg: dict) -> str:
+            """Extract a one-line preview from a message."""
+            content = msg["message"].get("content", "")
+            if isinstance(content, str):
+                preview = content
+            else:
+                preview = ""
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        preview = block.get("text", "")
+                        break
+                if not preview:
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            preview = f"[{block.get('name', 'tool')}]"
+                            break
+            preview = preview.replace("\n", " ").strip()
+            return preview[:57] + "..." if len(preview) > 60 else preview
+
+        # Iterative DFS: stack of (trie_node, prefix)
+        # We push children in reverse so first child is processed first.
+        # Each stack entry produces lines for the children of trie_node.
+        render_stack: list[tuple[dict, str]] = [(trie_root, "")]
+
+        while render_stack:
+            trie_node, prefix = render_stack.pop()
+            children_items = list(trie_node["children"].items())
+
+            # Push children in reverse (with their computed lines/prefix)
+            # so they come off the stack in forward order.
+            entries = []
+            for idx, (h, child) in enumerate(children_items):
+                last = idx == len(children_items) - 1
+
+                # Collect linear chain
+                chain = [child]
+                cur = child
+                while len(cur["children"]) == 1:
+                    cur = next(iter(cur["children"].values()))
+                    chain.append(cur)
+
+                msg = chain[0]["messages"][0]
+                preview = _preview(msg)
+                connector = "└─" if last else "├─"
+                count = chain[0]["count"]
+                n_msgs = len(chain)
+
+                if n_msgs == 1:
+                    role = "H" if msg["type"] == "user" else "A"
+                    line = f"{prefix}{connector} {role}: {preview}"
+                else:
+                    line = f"{prefix}{connector} [{n_msgs} msgs] {preview}"
+
+                if count > 1:
+                    line += f"  ×{count}"
+
+                end_node = chain[-1]
+                child_prefix = prefix + ("   " if last else "│  ")
+                entries.append((line, end_node, child_prefix))
+
+            # Push in reverse so first entry is popped first
+            for line, end_node, child_prefix in reversed(entries):
+                if end_node["children"]:
+                    render_stack.append((end_node, child_prefix))
+                # Prepend a marker so we can insert the line in order
+                lines.append((line, len(render_stack)))
+
+        # The lines list has (line_text, _) tuples; extract just text
+        # But the ordering is wrong because of stack reversal.
+        # Let me redo this properly.
+        lines.clear()
+
+        # Simpler iterative approach: use a stack that yields lines in order.
+        # Stack entries: ("line", line_text) or ("visit", trie_node, prefix)
+        render_stack2: list[tuple] = [("visit", trie_root, "")]
+
+        while render_stack2:
+            entry = render_stack2.pop()
+            if entry[0] == "line":
+                lines.append(entry[1])
+                continue
+
+            _, trie_node, prefix = entry
+            children_items = list(trie_node["children"].items())
+
+            # Push in reverse so first child's line comes first when popped
+            for idx in range(len(children_items) - 1, -1, -1):
+                h, child = children_items[idx]
+                last = idx == len(children_items) - 1
+
+                chain = [child]
+                cur = child
+                while len(cur["children"]) == 1:
+                    cur = next(iter(cur["children"].values()))
+                    chain.append(cur)
+
+                msg = chain[0]["messages"][0]
+                preview = _preview(msg)
+                connector = "└─" if last else "├─"
+                count = chain[0]["count"]
+                n_msgs = len(chain)
+
+                if n_msgs == 1:
+                    role = "H" if msg["type"] == "user" else "A"
+                    line = f"{prefix}{connector} {role}: {preview}"
+                else:
+                    line = f"{prefix}{connector} [{n_msgs} msgs] {preview}"
+
+                if count > 1:
+                    line += f"  ×{count}"
+
+                end_node = chain[-1]
+                child_prefix = prefix + ("   " if last else "│  ")
+
+                # Push visit first (will be processed after the line)
+                if end_node["children"]:
+                    render_stack2.append(("visit", end_node, child_prefix))
+                render_stack2.append(("line", line))
+
+        tree_text = "\n".join(lines)
+
+        return {
+            "tree": tree_text,
+            "session_count": len(all_sessions),
+            "node_count": sum(len(s) for s in all_sessions),
+        }
+
+    # -- Nodes format: canvas nodes/edges with chain collapsing --
 
     # Collapse linear chains in the trie.
     # Walk the trie and replace single-child runs with a summary.

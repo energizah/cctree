@@ -809,7 +809,7 @@ class ClaudeCodeFeature extends FeaturePlugin {
             return;
         }
 
-        this.showToast?.('Building unified DAG from all sessions...');
+        this.showToast?.('Building session tree...');
 
         try {
             const resp = await fetch(apiUrl('/api/claude-code/import-dag'), {
@@ -817,6 +817,7 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     cwd: this.forkIndex.cwd,
+                    format: 'tree',
                 }),
             });
 
@@ -825,56 +826,28 @@ class ClaudeCodeFeature extends FeaturePlugin {
                 throw new Error(detail.detail || `HTTP ${resp.status}`);
             }
 
-            const { nodes, edges, session_count } = await resp.json();
+            const { tree, session_count, node_count } = await resp.json();
 
-            if (nodes.length === 0) {
+            if (!tree) {
                 this.showToast?.('No conversation messages found.');
                 return;
             }
 
-            for (const nodeData of nodes) {
-                const node = createNode(nodeData.type, nodeData.content, {
-                    position: nodeData.position,
-                    width: nodeData.width,
-                    height: nodeData.height,
-                    model: nodeData.model,
-                    title: nodeData.title,
-                });
-                node.id = nodeData.id;
-                if (nodeData.created_at) {
-                    node.created_at = new Date(nodeData.created_at).getTime();
-                }
+            const header = `# Session Tree — ${this.forkIndex.cwd}\n`
+                + `${session_count} sessions, ${node_count} messages\n\n`;
 
-                this.graph.addNode(node);
+            const content = header + '```\n' + tree + '\n```';
 
-                if (nodeData.session_id) {
-                    this.forkIndex.set(node.id, {
-                        sessionId: nodeData.session_id,
-                        forkSessionId: null,
-                    });
-                }
-
-                // Store collapsed messages for expand-on-double-click
-                if (nodeData.collapsed_messages) {
-                    this._collapsedMessages.set(node.id, nodeData.collapsed_messages);
-                }
-            }
-
-            for (const edgeData of edges) {
-                const edge = createEdge(edgeData.source, edgeData.target, edgeData.type);
-                edge.id = edgeData.id;
-                this.graph.addEdge(edge);
-            }
+            const node = createNode(NodeType.NOTE, content, {
+                position: this.graph.autoPosition([]),
+                width: 800,
+            });
+            this.graph.addNode(node);
+            this.canvas.selectNode(node.id);
 
             this._saveIndex();
             this.saveSession();
-
-            // Add expand buttons after canvas has rendered the new nodes
-            requestAnimationFrame(() => {
-                setTimeout(() => this._addExpandButtons(), 100);
-            });
-
-            this.showToast?.(`Imported ${nodes.length} nodes from ${session_count} session(s).`);
+            this.showToast?.(`Tree: ${session_count} sessions, ${node_count} messages`);
         } catch (err) {
             console.error('[ClaudeCode] Import-all error:', err);
             this.showToast?.(`Import failed: ${err.message}`);
