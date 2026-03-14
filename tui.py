@@ -693,10 +693,12 @@ class SessionTreeApp(App):
             end_node = chain[-1]
             has_children = bool(end_node["children"])
 
+            all_msgs = [seg["messages"][0] for seg in chain]
             data = {
                 "session_ids": sorted(chain_session_ids),
                 "first_msg": chain[0]["messages"][0],
                 "last_msg": chain[-1]["messages"][0],
+                "msgs": all_msgs,
                 "msg_count": n_msgs,
                 "count": count,
                 "chain": chain if n_msgs > 1 else None,
@@ -745,15 +747,26 @@ class SessionTreeApp(App):
             result.append(f"Shared across: {count} sessions\n")
         result.append("\n")
 
-        first_msg = data.get("first_msg")
-        if first_msg:
-            result.append_text(_format_detail(first_msg))
+        msgs = data.get("msgs") or []
+        if not msgs:
+            first_msg = data.get("first_msg")
+            if first_msg:
+                msgs = [first_msg]
 
-        if msg_count > 1:
-            last_msg = data.get("last_msg")
-            if last_msg:
+        # Lazy: only format enough messages to fill the visible area
+        budget = max(self.size.height - 6, 10)  # lines available
+        lines_used = 0
+        for i, msg in enumerate(msgs):
+            if i > 0:
+                if lines_used >= budget:
+                    remaining = len(msgs) - i
+                    result.append(f"\n\n... {remaining} more message(s)", style="dim")
+                    break
                 result.append("\n\n")
-                result.append_text(_format_detail(last_msg))
+                lines_used += 2
+            formatted = _format_detail(msg)
+            lines_used += formatted.plain.count("\n") + 1
+            result.append_text(formatted)
 
         detail.update(result)
 
@@ -825,15 +838,17 @@ class SessionTreeApp(App):
         data = self._get(node.data) if node else None
         if not data:
             return
-        first_msg = data.get("first_msg")
-        if not first_msg:
+        msgs = data.get("msgs") or []
+        if not msgs:
+            first_msg = data.get("first_msg")
+            if first_msg:
+                msgs = [first_msg]
+        if not msgs:
             return
-        result = _format_detail(first_msg)
-        if data.get("msg_count", 1) > 1:
-            last_msg = data.get("last_msg")
-            if last_msg:
-                result.append("\n\n")
-                result.append_text(_format_detail(last_msg))
+        result = _format_detail(msgs[0])
+        for msg in msgs[1:]:
+            result.append("\n\n")
+            result.append_text(_format_detail(msg))
         self.copy_to_clipboard(result.plain)
         self.notify("Copied to clipboard")
 
