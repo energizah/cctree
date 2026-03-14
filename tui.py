@@ -597,6 +597,7 @@ class SessionTreeApp(App):
         height: 1fr;
     }
     #chat-input {
+        display: none;
         margin: 0 1;
     }
     #search-input {
@@ -1181,7 +1182,9 @@ class SessionTreeApp(App):
         self.notify("Copied to clipboard")
 
     def action_focus_input(self) -> None:
-        self.query_one("#chat-input", Input).focus()
+        chat_input = self.query_one("#chat-input", Input)
+        chat_input.display = True
+        chat_input.focus()
 
     def action_edit_message(self) -> None:
         """Open $EDITOR to compose a message, then submit it."""
@@ -1200,6 +1203,7 @@ class SessionTreeApp(App):
             text = Path(tmppath).read_text().strip()
             if text:
                 chat_input.value = text
+                chat_input.display = True
                 chat_input.focus()
         finally:
             Path(tmppath).unlink(missing_ok=True)
@@ -1666,6 +1670,8 @@ class SessionTreeApp(App):
         if not prompt or self._streaming:
             return
         event.input.value = ""
+        event.input.display = False
+        self.query_one("#tree", Tree).focus()
         self._snap(f"chat submit: {prompt[:60]!r}")
 
         # Get session_id and content_hash from selected tree node (if any)
@@ -1707,6 +1713,7 @@ class SessionTreeApp(App):
                 self.query_one("#tree", Tree).focus()
                 return
             if self.focused is self.query_one("#chat-input", Input):
+                self.query_one("#chat-input", Input).display = False
                 self.query_one("#tree", Tree).focus()
 
 
