@@ -6,9 +6,9 @@ directory.  Builds a trie from JSONL session files to detect shared prefixes
 Tree widget.
 
 Usage:
-    cc-tree /path/to/project
-    cc-tree                          # uses cwd
-    cc-tree --help / --version
+    cctree /path/to/project
+    cctree                          # uses cwd
+    cctree --help / --version
 
 Keybindings:
     j/k         cursor down/up
@@ -59,7 +59,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-_log = logging.getLogger("cc-tree")
+_log = logging.getLogger("cctree")
 _log.setLevel(logging.DEBUG)
 _log.addHandler(logging.NullHandler())
 
@@ -75,11 +75,11 @@ def _enable_logging() -> Path:
     """
     global _SCREENSHOT_DIR, _LOG_DIR
     import tempfile
-    _LOG_DIR = Path(tempfile.mkdtemp(prefix="cc-tree-"))
+    _LOG_DIR = Path(tempfile.mkdtemp(prefix="cctree-"))
     _SCREENSHOT_DIR = _LOG_DIR / "snap"
     _SCREENSHOT_DIR.mkdir()
 
-    handler = logging.FileHandler(_LOG_DIR / "cc-tree.log")
+    handler = logging.FileHandler(_LOG_DIR / "cctree.log")
     handler.setFormatter(logging.Formatter(
         "%(asctime)s.%(msecs)03d %(message)s", datefmt="%H:%M:%S"
     ))
@@ -1825,7 +1825,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="cc-tree",
+        prog="cctree",
         description="Interactive TUI for browsing Claude Code session trees.",
     )
     parser.add_argument("directory", nargs="?", default=str(Path.cwd()),
