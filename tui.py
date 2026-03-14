@@ -40,9 +40,10 @@ Features:
       subtrees are collapsed when moving to the next match
     - Text-presentation emoji role indicators (✨︎ assistant, ☻ human,
       🛠︎ tool result)
+    - Status bar: session metadata (date range, model, session ID)
+      on highlighted node
 
 Ideas / TODO:
-    - Session metadata in status bar (date range, cost, model)
     - r to reload sessions without restarting
     - Filter by date (today, this week, etc.)
     - o to open selected session in claude --resume
@@ -289,13 +290,17 @@ def _parse_session_file(path: Path) -> list[dict]:
         content = msg.get("content", "")
         raw = json.dumps(content, sort_keys=True)
         h = hashlib.sha256(f"{role}:{raw}".encode()).hexdigest()[:16]
-        result.append({
+        entry = {
             "type": rec.get("type"),
             "message": msg,
             "timestamp": rec.get("timestamp", ""),
             "content_hash": h,
             "session_id": rec.get("sessionId", ""),
-        })
+        }
+        model = msg.get("model")
+        if model:
+            entry["model"] = model
+        result.append(entry)
 
     return result
 
@@ -555,6 +560,7 @@ class SessionTreeApp(App):
         self._node_data: dict[int, dict] = {}  # id -> heavy data
         self._next_id = 0
         self._streaming = False
+        self._loading = True
         self._search_matches: list = []
         self._search_index: int = -1
         self._search_pattern: str = ""
@@ -597,6 +603,7 @@ class SessionTreeApp(App):
         tree.root.remove_children()
         self._add_trie_children(tree.root, self.trie_root)
 
+        self._loading = False
         status = self.query_one("#status", Static)
         node_count = self._count_nodes(self.trie_root)
         status.update(f" {self.session_count} sessions, {node_count} messages")
@@ -775,10 +782,12 @@ class SessionTreeApp(App):
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         """Show message detail when cursor moves to a node."""
         self.log.info(f"highlighted: node.data={event.node.data}")
-        self._pending_detail = self._get(event.node.data)
+        data = self._get(event.node.data)
+        self._pending_detail = data
         if self._detail_timer:
             self._detail_timer.stop()
         self._detail_timer = self.set_timer(0.02, self._flush_detail)
+        self._update_status_bar(data)
 
     def _flush_detail(self) -> None:
         self.log.info("flush_detail fired")
@@ -821,6 +830,50 @@ class SessionTreeApp(App):
             result.append_text(formatted)
 
         detail.update(result)
+
+    def _update_status_bar(self, data: dict | None) -> None:
+        """Update status bar with session metadata for the highlighted node."""
+        if self._loading:
+            return
+        status = self.query_one("#status", Static)
+        base = f" {self.session_count} sessions"
+
+        if not data:
+            status.update(base)
+            return
+
+        parts = [base]
+
+        # Date range from first/last message timestamps
+        first_ts = (data.get("first_msg") or {}).get("timestamp", "")
+        last_ts = (data.get("last_msg") or {}).get("timestamp", "")
+        if first_ts:
+            # Format: just date+time, drop timezone
+            first_short = first_ts[:16].replace("T", " ") if "T" in first_ts else first_ts[:16]
+            if last_ts and last_ts != first_ts:
+                last_short = last_ts[:16].replace("T", " ") if "T" in last_ts else last_ts[:16]
+                parts.append(f"{first_short} .. {last_short}")
+            else:
+                parts.append(first_short)
+
+        # Session ID(s) for this node
+        sids = data.get("session_ids", [])
+        if len(sids) == 1:
+            parts.append(f"session {sids[0][:8]}")
+        elif len(sids) > 1:
+            parts.append(f"{len(sids)} sessions")
+
+        # Model from messages
+        msgs = data.get("msgs") or []
+        if not msgs:
+            first_msg = data.get("first_msg")
+            if first_msg:
+                msgs = [first_msg]
+        models = {m.get("model") for m in msgs if m.get("model")}
+        if models:
+            parts.append(", ".join(sorted(models)))
+
+        status.update(" │ ".join(parts))
 
     def action_cursor_down(self) -> None:
         self.log.info("cursor_down")
