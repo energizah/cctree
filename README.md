@@ -14,9 +14,29 @@ cctree --log                # enable logging/screenshots to temp dir
 - **Chat input** (`i`): fork-rewind-resume via Claude CLI; tip replies skip forking
 - **Compose in editor** (`Ctrl-e`): open `$EDITOR` to write messages
 - **Search** (`/`): incremental label search + rg-backed full content search (`n`/`N`)
-- **Recent tips** (`f`/`F`): navigate session endpoints sorted by recency
+- **Recent tips** (`t`/`T`): navigate session endpoints sorted by recency
 - **Message age**: timestamps on all nodes, color-coded by session recency
 - **Detail panel** (`p`): sequential messages with syntax-highlighted code blocks
+
+## Keybindings
+
+| Key | Action |
+|-----|--------|
+| `q` / `Ctrl-c` | Quit |
+| `j` / `k` | Move cursor down / up |
+| `h` / `l` | Collapse / expand node |
+| `Ctrl-d` / `Ctrl-u` | Page down / up |
+| `g` / `G` | Jump to top / bottom |
+| `e` / `c` | Expand all / collapse all |
+| `t` / `T` | Next / previous recent session tip |
+| `p` | Toggle detail panel |
+| `y` | Copy detail to clipboard |
+| `o` | Open session in Claude CLI |
+| `i` | Chat input (fork-rewind-resume) |
+| `Ctrl-e` | Compose message in `$EDITOR` |
+| `/` | Search |
+| `n` / `N` | Next / previous search match |
+| `r` | Reload sessions |
 
 ## Setup
 
